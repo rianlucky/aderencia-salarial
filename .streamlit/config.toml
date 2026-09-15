@@ -1,0 +1,49 @@
+[theme]
+base = "light"
+# Mesmo navy institucional do painel Headcount (Desenvolvimento Organizacional/Headcount Total)
+# — identidade visual unificada entre os painéis da Central de Gente & Dados.
+primaryColor = "#064D66"
+backgroundColor = "#F5F7FA"
+secondaryBackgroundColor = "#FFFFFF"
+textColor = "#232323"
+font = "sans-serif"
+baseRadius = "medium"
+borderColor = "#E3E6EA"
+linkColor = "#064D66"
+linkUnderline = false
+showWidgetBorder = true
+showSidebarBorder = true
+
+greenColor = "#0ca30c"
+redColor = "#d03b3b"
+orangeColor = "#eb6834"
+blueColor = "#2a78d6"
+violetColor = "#8a4fd6"
+grayColor = "#64748b"
+
+chartCategoricalColors = ["#064D66", "#2a78d6", "#eb6834", "#0ca30c", "#d03b3b", "#64748b", "#8a4fd6"]
+dataframeBorderColor = "#E3E6EA"
+dataframeHeaderBackgroundColor = "#EDF1F3"
+
+[theme.sidebar]
+backgroundColor = "#FFFFFF"
+secondaryBackgroundColor = "#F5F7FA"
+textColor = "#232323"
+borderColor = "#E3E6EA"
+primaryColor = "#2a78d6"
+
+[client]
+# Painel interno (com login) — sem necessidade de esconder o menu de deploy,
+# mas mantemos o modo "viewer" por padrão, igual ao Headcount.
+toolbarMode = "viewer"
+# Sem isso, o padrão do Streamlit ("full") mostra o traceback inteiro de
+# qualquer erro não tratado pra quem estiver logado — pode vazar caminho de
+# arquivo, nome de variável ou fragmento de dado num erro inesperado. Erro
+# continua completo no terminal/log do servidor, só não vai pro navegador.
+showErrorDetails = "none"
+
+[server]
+headless = true
+
+[browser]
+gatherUsageStats = false

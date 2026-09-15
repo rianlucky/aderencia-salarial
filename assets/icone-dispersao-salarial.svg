@@ -1,0 +1,37 @@
+<svg width="512" height="512" viewBox="0 0 512 512" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <linearGradient id="bg" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#FFFFFF"/>
+      <stop offset="100%" stop-color="#F4F6F7"/>
+    </linearGradient>
+    <filter id="tileShadow" x="-30%" y="-30%" width="160%" height="160%">
+      <feDropShadow dx="0" dy="10" stdDeviation="14" flood-color="#064D66" flood-opacity="0.18"/>
+    </filter>
+    <filter id="elemShadow" x="-40%" y="-40%" width="180%" height="180%">
+      <feDropShadow dx="0" dy="3" stdDeviation="4" flood-color="#003244" flood-opacity="0.18"/>
+    </filter>
+  </defs>
+
+  <!-- App-icon style rounded tile, consistent with the other icons in the set -->
+  <rect x="16" y="16" width="480" height="480" rx="140" ry="140" fill="url(#bg)" filter="url(#tileShadow)"/>
+  <rect x="16" y="16" width="480" height="480" rx="140" ry="140" fill="none" stroke="#064D66" stroke-opacity="0.06" stroke-width="2"/>
+
+  <g filter="url(#elemShadow)">
+    <!-- Chart axis (yellow "L", rounded corner + rounded free ends) -->
+    <path d="M 130,124 L 130,346 Q 130,366 150,366 L 396,366"
+          fill="none" stroke="#FAB900" stroke-width="30" stroke-linecap="round" stroke-linejoin="round"/>
+
+    <!-- Salary-band reference lines (navy) -->
+    <line x1="168" y1="198" x2="382" y2="198" stroke="#064D66" stroke-width="15" stroke-linecap="round"/>
+    <line x1="168" y1="298" x2="382" y2="298" stroke="#064D66" stroke-width="15" stroke-linecap="round"/>
+
+    <!-- Data points: navy = within band, red = outside band -->
+    <circle cx="212" cy="242" r="18" fill="#064D66"/>
+    <circle cx="276" cy="266" r="18" fill="#064D66"/>
+    <circle cx="340" cy="220" r="18" fill="#064D66"/>
+
+    <circle cx="236" cy="158" r="18" fill="#F02727"/>
+    <circle cx="354" cy="150" r="18" fill="#F02727"/>
+    <circle cx="296" cy="334" r="18" fill="#F02727"/>
+  </g>
+</svg>
