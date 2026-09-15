@@ -46,6 +46,14 @@ Streamlit Community Cloud, colando o mesmo bloco TOML (com a `database_url`
 real, não o placeholder). Sem esse passo, a tela de login trava com "erro
 temporário de conexão" — não é um bug do app, é secret faltando no deploy.
 
+`etl/data/` (o consolidado de mercado e os 2 JSONs de mapeamento
+diretoria/área) também é gitignored, mas por um motivo diferente: são dados
+internos de RH, não segredo de acesso. O app **não quebra** sem eles (cai em
+"Não informado" pra Diretoria/Área), mas pra ter a correção completa também
+no deploy, cole o conteúdo de `cc_mapping.json`/`special_mappings.json` na
+seção `[mapping_diretoria]` do Secrets — formato em
+`.streamlit/secrets.toml.example`.
+
 ## Pipeline de referência salarial (`etl/upload_faixas_salariais.py`)
 
 A fonte é um export manual consolidado dos 5 recortes de pesquisa de mercado

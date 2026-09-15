@@ -125,6 +125,24 @@ usuário respondeu: "utilize como padrão 80% e 120% do Adequado" — os mesmos
 `PISO_IDEAL`/`TETO_IDEAL` já usados na régua de aderência do gráfico de
 dispersão. Não precisou mudar o ETL, só o cálculo em `app.py`.
 
+## Bug corrigido: app quebrava no deploy por causa dos JSONs de mapeamento (2026-09-15)
+
+Publicado em github.com/rianlucky/aderencia-salarial e testado no Streamlit
+Community Cloud: `FileNotFoundError` na importação de `etl/mapping_diretoria.py`
+— `etl/data/cc_mapping.json` não existe no clone (gitignored de propósito,
+dado interno de RH), e o módulo lia o arquivo direto no import, sem
+try/except, derrubando o app inteiro antes até da tela de login aparecer.
+
+Corrigido com `_load_mapping()`: tenta o arquivo local, senão tenta
+`st.secrets["mapping_diretoria"]`, senão cai num dict vazio (log de aviso, o
+app continua rodando — todo mundo aparece como "Não informado" pra
+Diretoria/Área). Pra ter a correção completa também no deploy, cola o
+conteúdo dos 2 JSONs no Secrets do Streamlit Cloud (formato documentado em
+`.streamlit/secrets.toml.example` e no README). Mesma lição do que já
+aconteceu antes com o CSV de mercado no OneDrive: gitignorar um dado sensível
+é a parte fácil — garantir que o código não *precisa* dele pra nem sequer
+subir é a parte que faltava.
+
 ## Decisão: login unificado em `app_users` (2026-09-15)
 
 Até aqui o login deste painel usava tabela própria (`posicionamento_app_users`),
