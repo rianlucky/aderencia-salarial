@@ -15,7 +15,7 @@ fonte inválida no XML gerado pela ferramenta de origem); usa o engine
 `calamine` (python-calamine, já instalado, bem mais tolerante a XML malformado).
 
 Atualiza SÓ os recortes listados em RECORTES (por Base_Pesquisa) — os demais
-recortes em `interno.mercado_salarial_muller` continuam como estão (com
+recortes em `mercado.mercado_salarial_muller` continuam como estão (com
 `salario_minimo`/`salario_maximo`/`data_retirada` NULL até serem atualizados
 também). Não é truncate + reload da tabela inteira como o
 `upload_faixas_salariais.py` original — é um DELETE + INSERT só das linhas do
@@ -56,17 +56,30 @@ RECORTES: list[tuple[str, str]] = [
 ]
 
 ALTER_SQL = f"""
-ALTER TABLE interno.{TABLE}
+ALTER TABLE mercado.{TABLE}
     ADD COLUMN IF NOT EXISTS salario_minimo NUMERIC,
     ADD COLUMN IF NOT EXISTS salario_maximo NUMERIC,
     ADD COLUMN IF NOT EXISTS data_retirada DATE
 """
 
 
+ETL_ENV_PATH = Path(__file__).resolve().parents[1] / "etl" / ".env"
+
+
 def _database_url() -> str:
-    with SECRETS_PATH.open("rb") as f:
-        secrets = tomllib.load(f)
-    return secrets["neon"]["database_url"]
+    """Escrita = usuário de carga `etl_loader`, lido de etl/.env (migrações 003/004).
+    O .streamlit/secrets.toml agora tem o usuário do painel, que só lê — por isso
+    este script não usa mais o secrets.toml. Aceita também a variável de ambiente."""
+    import os
+    url = os.getenv("NEON_DATABASE_URL")
+    if not url and ETL_ENV_PATH.exists():
+        for line in ETL_ENV_PATH.read_text(encoding="utf-8").splitlines():
+            line = line.strip()
+            if line.startswith("NEON_DATABASE_URL="):
+                url = line.split("=", 1)[1].strip().strip('"').strip("'")
+    if not url:
+        raise SystemExit(f"NEON_DATABASE_URL (usuário etl_loader) não encontrada em {ETL_ENV_PATH}")
+    return url
 
 
 def _extract(xlsx_path: Path, base_pesquisa: str) -> tuple[pd.DataFrame, date | None]:
@@ -129,17 +142,17 @@ def main() -> int:
                 for r in data.itertuples(index=False)
             ]
             with connection.cursor() as cursor:
-                cursor.execute(f"DELETE FROM interno.{TABLE} WHERE base_pesquisa = %s", (base_pesquisa,))
+                cursor.execute(f"DELETE FROM mercado.{TABLE} WHERE base_pesquisa = %s", (base_pesquisa,))
                 execute_values(
                     cursor,
-                    f"""INSERT INTO interno.{TABLE}
+                    f"""INSERT INTO mercado.{TABLE}
                         (cargo_empresa, cargo_pesquisa, base_pesquisa, salario_adequado, salario_minimo, salario_maximo, data_retirada)
                         VALUES %s""",
                     rows,
                     page_size=500,
                 )
             connection.commit()
-            log.info("%s: %d linhas gravadas em interno.%s", base_pesquisa, len(rows), TABLE)
+            log.info("%s: %d linhas gravadas em mercado.%s", base_pesquisa, len(rows), TABLE)
     finally:
         connection.close()
     log.info("Recortes atualizados com sucesso")

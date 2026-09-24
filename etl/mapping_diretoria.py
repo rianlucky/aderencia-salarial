@@ -1,32 +1,21 @@
-"""Resolução de diretoria/área — cópia deliberada da lógica do painel Headcount
-(`.../Desenvolvimento Organizacional/Headcount Total/etl/mapping.py`,
-função `resolve_diretoria_area`).
+"""Resolução de diretoria/área — lida do Neon (`core.mapeamento_diretoria`
+e `core.mapeamento_diretoria_especial`), não mais de JSON local.
 
-`interno.fato_funcionario_ativo` é um mirror bruto de `rh.gold.fato_funcionario_ativo`
-(Databricks): `nome_diretoria`/`nome_area` vêm direto do gold, sem a correção
-manual por centro de custo que o Headcount aplica (o gold fica desatualizado
-depois de reorganizações). Este painel tem `centro_de_custo`, `descricao_posicao`
-e `id_funcionario` disponíveis na mesma tabela — dá pra aplicar a mesma
-correção aqui sem duplicar pipeline nenhum, só reaproveitando os 2 JSONs de
-mapeamento (`etl/data/cc_mapping.json`, `etl/data/special_mappings.json`,
-cópias literais dos do Headcount, gitignored).
+Decisão do usuário em 2026-09-18: o painel de Aderência Salarial quebrou no
+deploy porque o mapeamento vivia só num JSON gitignored — sem esse arquivo no
+clone do Streamlit Cloud, a resolução de diretoria falhava antes até da tela
+de login aparecer. Subir pro Neon (`etl/upload_mapeamento_diretoria.py`)
+remove essa dependência de arquivo: mesmo banco em qualquer ambiente.
 
-Se o Headcount atualizar o mapeamento (novo CC, reorganização), estes 2 JSONs
-precisam ser resincronizados manualmente — mesmo trade-off que já existe pro
-CSV de referência de mercado (`etl/upload_faixas_salariais.py`).
-
-**Deploy (2026-09-15):** `etl/data/` é gitignored — o clone do Streamlit
-Community Cloud não tem esses 2 arquivos, e o app quebrava na importação
-(`FileNotFoundError` batendo o app inteiro, mesmo antes do login). Agora
-`_load_mapping` tenta o arquivo local e, se não achar, tenta
-`st.secrets["mapping_diretoria"]` (colar o JSON como secret, mesmo lugar do
-`[neon] database_url` — ver README); sem nenhum dos dois, cai num dict vazio
-e loga um aviso — todo mundo aparece como "Não informado" em vez do app cair.
+Fallback em cascata se o Neon não responder: tenta os JSONs locais em
+`etl/data/` (cópias antigas, se existirem) e, sem isso, cai num dict vazio —
+nunca derruba o app, só mostra "Não informado" pra Diretoria/Área.
 """
 
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent / "data"
@@ -34,25 +23,54 @@ ROOT = Path(__file__).resolve().parent / "data"
 NAO_INFORMADO = "Não informado"
 
 
-def _load_mapping(filename: str, secret_key: str) -> dict:
-    path = ROOT / filename
-    if path.exists():
-        return json.loads(path.read_text(encoding="utf-8"))
+def _database_url() -> str | None:
     try:
         import streamlit as st
 
-        return json.loads(st.secrets["mapping_diretoria"][secret_key])
+        return st.secrets["neon"]["database_url"]
     except Exception:
-        print(
-            f"[mapping_diretoria] {filename} não encontrado (nem em {path}, nem em "
-            f'st.secrets["mapping_diretoria"]["{secret_key}"]) — diretoria/área ficam '
-            '"Não informado" até um dos dois existir.'
-        )
+        return os.getenv("NEON_DATABASE_URL")
+
+
+def _load_from_neon() -> tuple[dict, dict] | None:
+    database_url = _database_url()
+    if not database_url:
+        return None
+    try:
+        import psycopg2
+        import psycopg2.extras
+
+        with psycopg2.connect(database_url) as conn, conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute("SELECT centro_de_custo, diretoria, area FROM core.mapeamento_diretoria")
+            cc_mapping = {r["centro_de_custo"]: {"diretoria": r["diretoria"], "area": r["area"]} for r in cur.fetchall()}
+
+            cur.execute("SELECT centro_de_custo, tipo, chave, diretoria, area FROM core.mapeamento_diretoria_especial")
+            special_mappings: dict = {}
+            for r in cur.fetchall():
+                bloco = special_mappings.setdefault(r["centro_de_custo"], {"by_position": {}, "by_person": {}})
+                bloco[r["tipo"]][r["chave"]] = {"diretoria": r["diretoria"], "area": r["area"]}
+        return cc_mapping, special_mappings
+    except Exception as exc:  # noqa: BLE001
+        print(f"[mapping_diretoria] Falha lendo o Neon, tentando fallback local: {exc}")
+        return None
+
+
+def _load_from_local_json() -> tuple[dict, dict]:
+    def _read(filename: str) -> dict:
+        path = ROOT / filename
+        if path.exists():
+            return json.loads(path.read_text(encoding="utf-8"))
         return {}
 
+    return _read("cc_mapping.json"), _read("special_mappings.json")
 
-CC_MAPPING = _load_mapping("cc_mapping.json", "cc_mapping")
-SPECIAL_MAPPINGS = _load_mapping("special_mappings.json", "special_mappings")
+
+_loaded = _load_from_neon()
+if _loaded is None:
+    _loaded = _load_from_local_json()
+    if not _loaded[0]:
+        print("[mapping_diretoria] Sem Neon e sem JSON local — diretoria/área ficam 'Não informado' até um dos dois existir.")
+CC_MAPPING, SPECIAL_MAPPINGS = _loaded
 
 
 def resolve_diretoria_area(cc: str | None, descricao_posicao: str | None, id_funcionario) -> tuple[str, str]:

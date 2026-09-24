@@ -29,8 +29,8 @@ FAIXA_MIN, FAIXA_MAX = 60, 140
 PISO_IDEAL, TETO_IDEAL = 80, 120
 DIST_MAX = min(PISO_IDEAL - FAIXA_MIN, FAIXA_MAX - TETO_IDEAL)  # 20pp — mesmo raio pros dois lados
 
-MARKET_TABLE = "interno.mercado_salarial_muller"
-PEOPLE_TABLE = "interno.fato_funcionario_ativo"
+MARKET_TABLE = "mercado.mercado_salarial_muller"
+PEOPLE_TABLE = "core_view.funcionario_ativo"  # view sem PII pessoal (migração 001)
 
 
 @st.cache_resource

@@ -49,8 +49,7 @@ log = logging.getLogger("upload_faixas_salariais")
 TABLE = "mercado_salarial_muller"
 
 CREATE_TABLE_SQL = f"""
-CREATE SCHEMA IF NOT EXISTS interno;
-CREATE TABLE IF NOT EXISTS interno.{TABLE} (
+CREATE TABLE IF NOT EXISTS mercado.{TABLE} (
     cargo_empresa TEXT NOT NULL,
     cargo_pesquisa TEXT,
     base_pesquisa TEXT NOT NULL,
@@ -64,10 +63,23 @@ CREATE TABLE IF NOT EXISTS interno.{TABLE} (
 """
 
 
+ETL_ENV_PATH = Path(__file__).resolve().parents[1] / "etl" / ".env"
+
+
 def _database_url() -> str:
-    with SECRETS_PATH.open("rb") as f:
-        secrets = tomllib.load(f)
-    return secrets["neon"]["database_url"]
+    """Escrita = usuário de carga `etl_loader`, lido de etl/.env (migrações 003/004).
+    O .streamlit/secrets.toml agora tem o usuário do painel, que só lê — por isso
+    este script não usa mais o secrets.toml. Aceita também a variável de ambiente."""
+    import os
+    url = os.getenv("NEON_DATABASE_URL")
+    if not url and ETL_ENV_PATH.exists():
+        for line in ETL_ENV_PATH.read_text(encoding="utf-8").splitlines():
+            line = line.strip()
+            if line.startswith("NEON_DATABASE_URL="):
+                url = line.split("=", 1)[1].strip().strip('"').strip("'")
+    if not url:
+        raise SystemExit(f"NEON_DATABASE_URL (usuário etl_loader) não encontrada em {ETL_ENV_PATH}")
+    return url
 
 
 def load_reference(csv_path: Path) -> pd.DataFrame:
@@ -94,10 +106,10 @@ def upload(connection, data: pd.DataFrame) -> None:
     ]
     with connection.cursor() as cursor:
         cursor.execute(CREATE_TABLE_SQL)
-        cursor.execute(f"TRUNCATE TABLE interno.{TABLE}")
+        cursor.execute(f"TRUNCATE TABLE mercado.{TABLE}")
         execute_values(
             cursor,
-            f"INSERT INTO interno.{TABLE} (cargo_empresa, cargo_pesquisa, base_pesquisa, salario_adequado) VALUES %s",
+            f"INSERT INTO mercado.{TABLE} (cargo_empresa, cargo_pesquisa, base_pesquisa, salario_adequado) VALUES %s",
             rows,
             page_size=500,
         )
@@ -122,7 +134,7 @@ def main() -> int:
         upload(connection, data)
     finally:
         connection.close()
-    log.info("Referência de mercado gravada em interno.%s", TABLE)
+    log.info("Referência de mercado gravada em mercado.%s", TABLE)
     return 0
 
 

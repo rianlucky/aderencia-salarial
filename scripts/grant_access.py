@@ -50,15 +50,31 @@ ON CONFLICT (email) DO UPDATE SET name = EXCLUDED.name, updated_at = now()
 REVOKE_SQL = f"DELETE FROM {USERS_TABLE} WHERE email = %s"
 
 
+ETL_ENV_PATH = Path(__file__).resolve().parents[1] / "etl" / ".env"
+
+
 def _database_url() -> str:
-    with SECRETS_PATH.open("rb") as f:
-        secrets = tomllib.load(f)
-    return secrets["neon"]["database_url"]
+    """Escrita = usuário de carga `etl_loader`, lido de etl/.env (migrações 003/004).
+    O .streamlit/secrets.toml agora tem o usuário do painel, que só lê — por isso
+    este script não usa mais o secrets.toml. Aceita também a variável de ambiente."""
+    import os
+    url = os.getenv("NEON_DATABASE_URL")
+    if not url and ETL_ENV_PATH.exists():
+        for line in ETL_ENV_PATH.read_text(encoding="utf-8").splitlines():
+            line = line.strip()
+            if line.startswith("NEON_DATABASE_URL="):
+                url = line.split("=", 1)[1].strip().strip('"').strip("'")
+    if not url:
+        raise SystemExit(f"NEON_DATABASE_URL (usuário etl_loader) não encontrada em {ETL_ENV_PATH}")
+    return url
 
 
 def grant(conn, email: str, name: str) -> None:
     with conn.cursor() as cur:
-        cur.execute(CREATE_TABLE_SQL)
+        # etl_loader não tem CREATE em public; a tabela já existe (migrações).
+        cur.execute("SELECT to_regclass('public.app_users')")
+        if cur.fetchone()[0] is None:
+            cur.execute(CREATE_TABLE_SQL)
         cur.execute(GRANT_SQL, (email.strip().lower(), name.strip()))
     conn.commit()
 
@@ -70,11 +86,6 @@ def revoke(conn, email: str) -> None:
 
 
 def main() -> None:
-    if not SECRETS_PATH.exists():
-        print(f"Não encontrei {SECRETS_PATH}.")
-        print("Configure [neon] com a database_url antes de rodar este script (veja .streamlit/secrets.toml.example).")
-        sys.exit(1)
-
     conn = psycopg2.connect(_database_url())
     print("Conceder acesso a app_users (todos os dashboards, sem segregação por painel ainda) — deixe o e-mail em branco e aperte Enter para parar.")
     print("(a pessoa define a própria senha no primeiro login; não se cadastra senha aqui)\n")
