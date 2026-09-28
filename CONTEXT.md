@@ -7,7 +7,7 @@
 | Salário pessoa a pessoa | `core_view.funcionario_ativo` (sem PII pessoal) | mirror do Headcount Total | `app.py` (`app_aderencia`) |
 | Referência de mercado (Carreira Muller) | `mercado.mercado_salarial_muller` | `etl/upload_faixas_salariais.py`, `etl/atualizar_recorte_mercado.py` (`etl_loader`, via `etl/.env`) | `app.py`, Estudos Salariais |
 | CC → Diretoria/Área | `core.mapeamento_diretoria*` | Movimentações (`upload_mapeamento_diretoria.py`) | `etl/mapping_diretoria.py` — agora lê do Neon; os JSON de `etl/data/` viraram só fallback |
-| Login | `public.app_users` | `scripts/grant_access.py` (`etl_loader`, via `etl/.env`) | `auth.py` |
+| Login | `public.app_users` | `_neon/acessos/admin_acessos.py` (ferramenta local) | `auth.py` |
 
 `interno.mercado_salarial_muller` agora é **view de compatibilidade** — não escrever nela. O secret `[mapping_diretoria]` do Streamlit Cloud não é mais necessário (o mapeamento vem do Neon). Mudança de estrutura: só via `_neon/migrations/`, testada antes no branch `dev`. Trechos abaixo que citam `interno.*` são históricos.
 

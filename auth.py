@@ -10,7 +10,7 @@ aqui também, sem controle de acesso por painel até essa segregação futura se
 implementada.
 
 O acesso é liberado pelo DO inserindo o e-mail na tabela (sem senha — ver
-scripts/grant_access.py). No primeiro login a própria pessoa define sua senha;
+ferramenta local de acessos _neon/acessos/admin_acessos.py). No primeiro login a própria pessoa define sua senha;
 nos acessos seguintes, ela só precisa digitar a senha. Quem não tem o e-mail
 cadastrado não passa da primeira tela.
 
@@ -32,7 +32,13 @@ import psycopg2
 import psycopg2.extras
 import streamlit as st
 
-SUPPORT_EMAIL = "rian.jesus@pacaembu.com"
+def _email_suporte() -> str:
+    """E-mail para pedir acesso: vem dos Secrets ([app] email_suporte), nunca do código —
+    o repositório é público."""
+    try:
+        return st.secrets["app"]["email_suporte"]
+    except Exception:  # noqa: BLE001
+        return "o time de People Analytics"
 
 MAX_FAILED_ATTEMPTS = 5
 LOCKOUT_MINUTES = 15
@@ -220,7 +226,7 @@ def _screen_connection_error() -> None:
 
 def _screen_no_access(email: str) -> None:
     def form() -> None:
-        st.warning(f"O e-mail **{email}** ainda não tem acesso a este painel. Solicite a inclusão para **{SUPPORT_EMAIL}**.")
+        st.warning(f"O e-mail **{email}** ainda não tem acesso a este painel. Solicite a inclusão para **{_email_suporte()}**.")
         if st.button("Tentar outro e-mail", width="stretch"):
             st.session_state["auth_email"] = None
             st.rerun()
@@ -342,7 +348,7 @@ def exigir_acesso_ao_painel(painel: str) -> None:
                 if st.button("Tentar novamente", width="stretch"):
                     st.rerun()
             else:
-                st.warning(f"O usuário **{email}** não tem acesso a este painel. Solicite a inclusão para **{SUPPORT_EMAIL}**.")
+                st.warning(f"O usuário **{email}** não tem acesso a este painel. Solicite a inclusão para **{_email_suporte()}**.")
             if st.button("Sair", key="sair_sem_acesso", width="stretch"):
                 st.session_state["auth_user"] = None
                 st.session_state["auth_email"] = None

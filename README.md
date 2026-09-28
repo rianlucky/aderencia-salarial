@@ -76,12 +76,10 @@ Mesmo fluxo de login por e-mail/senha do painel Headcount (`auth.py`) e, desde
 dashboards. Até essa data era uma tabela própria (`posicionamento_app_users`),
 separada porque este painel expõe salário nominal por pessoa; a unificação
 foi um pedido explícito do usuário, com segregação de acesso por painel
-prevista pra uma etapa futura (ainda não implementada) — hoje, quem tem
-login em qualquer app do usuário entra aqui também.
-
-```powershell
-python scripts/grant_access.py
-```
+controlada pela **matriz de acessos** da Central (painel liberado por grupo/pessoa,
+em `acesso.v_permissoes`). Cadastro de usuários e acessos pela ferramenta local
+`_neon/acessos/admin_acessos.py`. O e-mail para pedir acesso vem dos Secrets
+(`[app] email_suporte`).
 
 ## Metodologia do mapa de dispersão
 
