@@ -154,7 +154,9 @@ auth.init_db()
 auth.require_login()
 auth.exigir_acesso_ao_painel("aderencia")  # matriz de acessos (acesso.v_permissoes)
 
-wordmark = _build_logo_wordmark(LOGO_PATH, "Aderência Salarial")
+# imagem pronta (gerada com a fonte do Windows): no Streamlit Cloud, gerar na hora dava nome minúsculo
+_pronto = Path(__file__).parent / "assets" / "logo-wordmark.png"
+wordmark = str(_pronto) if _pronto.exists() else _build_logo_wordmark(LOGO_PATH, "Aderência Salarial")
 st.logo(wordmark if wordmark is not None else LOGO_PATH, icon_image=LOGO_PATH, size="large")
 
 
