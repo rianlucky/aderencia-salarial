@@ -152,6 +152,7 @@ st.markdown(
 
 auth.init_db()
 auth.require_login()
+auth.exigir_acesso_ao_painel("aderencia")  # matriz de acessos (acesso.v_permissoes)
 
 wordmark = _build_logo_wordmark(LOGO_PATH, "Aderência Salarial")
 st.logo(wordmark if wordmark is not None else LOGO_PATH, icon_image=LOGO_PATH, size="large")
