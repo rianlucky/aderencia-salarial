@@ -67,7 +67,7 @@ ETL_ENV_PATH = Path(__file__).resolve().parents[1] / "etl" / ".env"
 
 
 def _database_url() -> str:
-    """Escrita = usuário de carga `etl_loader`, lido de etl/.env (migrações 003/004).
+    """Escrita = usuário de carga, lido de etl/.env (migrações 003/004).
     O .streamlit/secrets.toml agora tem o usuário do painel, que só lê — por isso
     este script não usa mais o secrets.toml. Aceita também a variável de ambiente."""
     import os
@@ -78,7 +78,7 @@ def _database_url() -> str:
             if line.startswith("NEON_DATABASE_URL="):
                 url = line.split("=", 1)[1].strip().strip('"').strip("'")
     if not url:
-        raise SystemExit(f"NEON_DATABASE_URL (usuário etl_loader) não encontrada em {ETL_ENV_PATH}")
+        raise SystemExit(f"NEON_DATABASE_URL (usuário de carga) não encontrada em {ETL_ENV_PATH}")
     return url
 
 

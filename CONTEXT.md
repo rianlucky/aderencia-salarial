@@ -4,8 +4,8 @@
 
 | O quê | Onde | Quem escreve | Quem lê |
 |---|---|---|---|
-| Salário pessoa a pessoa | `core_view.funcionario_ativo` (sem PII pessoal) | mirror do Headcount Total | `app.py` (`app_aderencia`) |
-| Referência de mercado (Carreira Muller) | `mercado.mercado_salarial_muller` | `etl/upload_faixas_salariais.py`, `etl/atualizar_recorte_mercado.py` (`etl_loader`, via `etl/.env`) | `app.py`, Estudos Salariais |
+| Salário pessoa a pessoa | `core_view.funcionario_ativo` (sem PII pessoal) | mirror do Headcount Total | `app.py` (usuário dedicado do painel) |
+| Referência de mercado (Carreira Muller) | `mercado.mercado_salarial_muller` | `etl/upload_faixas_salariais.py`, `etl/atualizar_recorte_mercado.py` (usuário de carga, via `etl/.env`) | `app.py`, Estudos Salariais |
 | CC → Diretoria/Área | `core.mapeamento_diretoria*` | Movimentações (`upload_mapeamento_diretoria.py`) | `etl/mapping_diretoria.py` — agora lê do Neon; os JSON de `etl/data/` viraram só fallback |
 | Login | `public.app_users` | `_neon/acessos/admin_acessos.py` (ferramenta local) | `auth.py` |
 

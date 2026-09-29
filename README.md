@@ -94,3 +94,44 @@ em `acesso.v_permissoes`). Cadastro de usuários e acessos pela ferramenta local
   recentes, não tem equivalente na pesquisa e fica fora do gráfico).
 - A barra lateral deixa trocar o recorte de pesquisa (5 opções) e filtrar por
   diretoria, área, categoria de atribuição e função de cargo.
+
+## Polimento de 29/09/2026 (padrão da Central)
+
+Página única em seções numeradas (na impressão, cada seção numa folha; a primeira folha é a capa):
+
+1. **Posicionamento na tabela salarial** — compa-ratio pessoa a pessoa (salário ÷ salário adequado da
+   pesquisa), faixa ideal 80%–120%, filtro de classificação ao lado do título.
+2. **Onde está a defasagem** — aderência por nível de gerenciamento (variações juntas, como no
+   Headcount) e mapa de calor diretoria × nível (% dentro da faixa).
+3. **Penetração na faixa e tempo de casa** — onde o salário cai entre o mínimo e o máximo de mercado
+   do cargo; compa-ratio mediano por tempo de casa.
+4. **Custo de enquadramento** — quanto falta, por mês e por ano (12 + 13º + 1/3 de férias, sem
+   encargos), para levar a 80% ou a 100% do adequado quem está abaixo; por diretoria e por cargo;
+   lista exportável.
+5. **Compressão salarial** — no mesmo cargo, mediana de quem entrou nos últimos 12 meses x veteranos.
+6. **Extremos e detalhamento** — 5 mais abaixo/acima e a busca pessoa a pessoa (exportável).
+7. **Job Matching** — cobertura da pesquisa e cargos com/sem equivalente.
+
+Também: login e barra lateral padrão (rodapé com Fonte, Atualizado em e data do mercado), cabeçalho
+com selos (base de pesquisa e filtros), cards com o recorte da bandeira, fonte Nunito, filtros novos
+de centro de custo e nível de gerenciamento, exportações em Excel com aba "Filtros". Cálculos em
+`metricas.py`. Compa-ratio interno (contra uma tabela salarial oficial) fica para quando a tabela
+existir no Neon — a "faixa interna" do Job Matching é o menor e o maior salário pago hoje.
+
+Ajustes do mesmo dia:
+- **Compa-ratio e penetração em razão** (compa = salário ÷ adequado, 1,00 = na referência; penetração
+  0,00 no mínimo e 1,00 no máximo de mercado); faixa ideal 0,80 a 1,20. Um "i" (desenhado em CSS) no
+  card do compa-ratio e nos de custo explica os conceitos. Enquadramento com alvo em compa-ratio 0,80
+  ou 1,00, com aviso de que o custo é referência para orçamento — a diretoria pode seguir uma linha
+  interna própria, inclusive abaixo do mercado.
+- **3 páginas na barra lateral** (`st.navigation`, como no Turnover Comercial; cada página só desenha o
+  que é dela): **Analítico** (página inicial: dispersão pessoa a pessoa, extremos e detalhamento com as
+  200 primeiras linhas + busca; o Excel leva todas) · **Defasagem e Enquadramento** (cards, nível e
+  diretoria × nível, penetração e tempo de casa, custo de enquadramento) · **Cargo e Mercado** (Job
+  Matching e compressão salarial). A classificação (Abaixo/Dentro/Acima) filtra só o Analítico. As
+  planilhas Excel são geradas só no clique de exportar (antes, a cada interação).
+- **Base "Personalizado (em cascata)"** (padrão): o usuário arrasta a ordem das bases; cada cargo usa a
+  primeira base da lista que tem referência para ele (padrão: GRH ECI Ramo Econômico → GRH ECI Acima
+  de 1000 → Indústria da Construção). A base usada aparece no tooltip, no detalhamento, no Job Matching
+  e nas exportações. Componente de arrastar: `streamlit-sortables`. Em 29/09/2026 a Indústria da
+  Construção cobre os 231 cargos mapeados: como fecha a lista, nenhum cargo fica sem referência pela ordem.

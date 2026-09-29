@@ -1,1089 +1,562 @@
+"""Painel Aderência Salarial — salário de cada colaborador frente à referência de mercado
+(Carreira Muller) do cargo equivalente (Remuneração e Orçamento de Pessoas).
+
+Fontes (Neon): core_view.funcionario_ativo (quadro ativo, regra única da Central) e
+mercado.mercado_salarial_muller (etl/upload_faixas_salariais.py). Diretoria/área pelo mapeamento
+oficial (etl/mapping_diretoria.py). Cálculos em metricas.py. Padrão visual: skill padrao-painel-streamlit.
+
+    streamlit run app.py
+"""
 from __future__ import annotations
 
 import html as html_lib
 import io
-import os
 import sys
+from datetime import date, datetime
 from pathlib import Path
 
-import altair as alt
 import numpy as np
 import pandas as pd
+import psycopg2
 import streamlit as st
+from streamlit_sortables import sort_items
 
 import auth
+import metricas as m
+import painel_padrao as pp
 
 ROOT = Path(__file__).resolve().parent
 sys.path.insert(0, str(ROOT / "etl"))
 import mapping_diretoria  # noqa: E402
 
-LOGO_PATH = "assets/icone-dispersao-salarial-transparente.png"
-
-BRAND_COLOR = "#064D66"
-GREEN = "#0ca30c"
-RED = "#d03b3b"
-ORANGE = "#eb6834"
-GRAY = "#64748b"
-
+ICONE = ROOT / "assets" / "icone-dispersao-salarial-transparente.png"
+AZUL, AMARELO, VERMELHO, VERDE, LARANJA = "#064D66", "#FAB900", "#F02727", "#16A34A", "#EB6834"
+AZUL_MEDIO, CINZA, CINZA_ESCURO = "#4A8FA8", "#6B7280", "#1F2937"
+COR_CLASSE = {"Abaixo": VERMELHO, "Dentro": VERDE, "Acima": LARANJA}
 FAIXA_MIN, FAIXA_MAX = 60, 140
-PISO_IDEAL, TETO_IDEAL = 80, 120
-DIST_MAX = min(PISO_IDEAL - FAIXA_MIN, FAIXA_MAX - TETO_IDEAL)  # 20pp — mesmo raio pros dois lados
+SEM_DADOS = "Sem colaboradores com referência de mercado no filtro selecionado."
+AJUDA_COMPA = ("Compa-ratio = salário ÷ salário adequado de mercado do cargo (Carreira Muller). Faixa ideal da "
+               "Pacaembu Construtora: 0,80 a 1,20. Penetração = onde o salário está dentro da faixa de mercado do cargo: "
+               "0,00 no mínimo, 1,00 no máximo.")
+AJUDA_ENQ = ("Enquadramento = para cada pessoa com compa-ratio abaixo do alvo, a diferença entre o salário do alvo "
+             "(adequado de mercado × 0,80 ou × 1,00) e o salário-base atual, somada no mês. Anual = mensal × 13,33 "
+             "(12 salários + 13º + 1/3 de férias), sem encargos.")
+TEXTO_ENQ = ("<b>Como ler este custo.</b> O valor mostra o esforço financeiro para aproximar os salários da referência "
+             "de mercado escolhida; não significa que todos os casos precisem ser enquadrados. A Pacaembu Construtora "
+             "pode adotar uma política ou dinâmica interna própria, com uma linha de referência inclusive abaixo do "
+             "praticado pelo mercado, de acordo com a estratégia de remuneração e a abordagem definida pela diretoria. "
+             "Use o número como base para priorização e orçamento, não como proposta de reajuste.")
+LIMITE_TABELA = 200  # linhas desenhadas no detalhamento; o Excel leva todas
+PERSONALIZADO = "Personalizado (em cascata)"
+# ordem padrão do Personalizado (definida pelo time de Remuneração em 29/09/2026)
+ORDEM_PADRAO = ["GRH ECI - Ramo Econômico", "GRH ECI - Acima de 1000 Colaboradores", "Indústria da Construção"]
+CSS_ARRASTAR = """
+.sortable-component { border: 1px solid #CBD8DE; border-radius: 10px; padding: 4px; background: #F5F8FA; }
+.sortable-container { background: #FFFFFF; border-radius: 8px; margin: 4px 0; padding: 4px; counter-reset: item; }
+.sortable-container-header { font-weight: 700; color: #064D66; font-size: .78rem; padding: 4px 6px; }
+.sortable-item, .sortable-item:hover { background: #EAF4F7; color: #003244; border: 1px solid #CFE3EA; border-radius: 6px;
+    font-size: .8rem; font-weight: 600; margin: 3px 4px; padding: 5px 8px; cursor: grab; }
+"""
 
-MARKET_TABLE = "mercado.mercado_salarial_muller"
-PEOPLE_TABLE = "core_view.funcionario_ativo"  # view sem PII pessoal (migração 001)
+st.set_page_config(page_title="Aderência Salarial · Pacaembu Construtora", page_icon=str(ICONE), layout="wide")
 
+# login antes de qualquer dado + matriz de acessos (painel restrito: salário nominal por pessoa)
+auth.exigir_login()
+auth.exigir_acesso_ao_painel("aderencia")
 
-@st.cache_resource
-def _build_logo_wordmark(icon_path: str, text: str) -> "Image.Image | None":
-    """Ícone + palavra-marca lado a lado, cozidos numa imagem só — st.logo() só
-    tem um slot fixo de imagem e não deixa colocar texto ao lado. Mesmo padrão
-    do painel Headcount (`.../Headcount Total/app.py::_build_logo_wordmark`)."""
-    try:
-        from PIL import Image, ImageDraw, ImageFont
-
-        icon = Image.open(icon_path).convert("RGBA")
-        target_h = 64
-        icon = icon.resize((int(icon.width * target_h / icon.height), target_h))
-
-        font = None
-        for font_path in (r"C:\Windows\Fonts\segoeuib.ttf", r"C:\Windows\Fonts\arialbd.ttf"):
-            if Path(font_path).exists():
-                font = ImageFont.truetype(font_path, 34)
-                break
-        if font is None:
-            font = ImageFont.load_default()
-
-        draw = ImageDraw.Draw(Image.new("RGBA", (1, 1)))
-        text_box = draw.textbbox((0, 0), text, font=font)
-        text_w, text_h = text_box[2] - text_box[0], text_box[3] - text_box[1]
-
-        padding = 14
-        canvas = Image.new("RGBA", (icon.width + padding + text_w + 4, target_h), (0, 0, 0, 0))
-        canvas.paste(icon, (0, 0), icon)
-        draw = ImageDraw.Draw(canvas)
-        draw.text(
-            (icon.width + padding, (target_h - text_h) // 2 - text_box[1]),
-            text,
-            font=font,
-            fill=BRAND_COLOR,
-        )
-        return canvas
-    except Exception as exc:
-        print(f"[posicionamento] Falha ao montar o logo com texto: {exc}")
-        return None
+st.html(f"""<style>
+.aviso-enq {{ background:#FFF8E1; border:1px solid #FBE3A0; border-left:4px solid #FAB900; border-radius:8px;
+    color:#1F2937; font-size:.84rem; line-height:1.5; padding:.65rem .9rem; margin:.1rem 0 .7rem; }}
+.aviso-enq b {{ color:#064D66; }}
+.htbl-wrap {{ overflow:auto; border:1px solid #E3E6EA; border-radius:10px; background:#fff; }}
+.htbl-row {{ display:flex; align-items:center; border-bottom:1px solid #EEF1F4; font-size:13px; }}
+.htbl-row:last-child {{ border-bottom:none; }}
+.htbl-head {{ background:#EDF1F3; font-weight:700; color:{CINZA_ESCURO}; position:sticky; top:0; z-index:1; }}
+.htbl-cell {{ padding:7px 10px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }}
+</style>""")
 
 
-st.set_page_config(
-    page_title="Pacaembu | Aderência Salarial",
-    page_icon=LOGO_PATH,
-    layout="wide",
-    initial_sidebar_state="auto",
-)
+# ----------------------------------------------------------------------------- dados
 
-# Mesmo padrão visual do painel Headcount (Desenvolvimento Organizacional/Headcount
-# Total): navy institucional #064D66 nos títulos e cards, cartão de login dividido.
-# Injetado ANTES do require_login() porque essa mesma tela usa o CSS.
-st.markdown(
-    """
-    <style>
-    h3 {
-        font-weight: 700;
-        color: #064D66;
-        margin-top: 25px;
-    }
-    .st-key-card-kpis, .st-key-card-scatter, .st-key-card-detalhe, .st-key-card-pizza-nivel,
-    .st-key-card-top5, .st-key-card-jobmatching-overview, .st-key-card-jobmatching-tabelas {
-        background-color: #FFFFFF;
-        border-radius: 12px;
-        box-shadow: 0 2px 8px rgba(0, 50, 68, 0.08);
-    }
-    [class*="st-key-kpi-card-"] {
-        border-radius: 14px;
-        overflow: hidden;
-        box-shadow: 0 2px 8px rgba(0, 50, 68, 0.10);
-        border: none;
-    }
-    [class*="st-key-kpi-card-"] > div {
-        border: none !important;
-    }
-
-    .st-key-login_page { margin-top: 10vh; }
-    [data-testid="stVerticalBlockBorderWrapper"].st-key-login_card {
-        border: none !important; border-radius: 16px; overflow: hidden; padding: 0 !important;
-        box-shadow: 0 14px 40px rgba(6, 77, 102, .18);
-    }
-    .st-key-login_card [data-testid="stHorizontalBlock"] { gap: 0 !important; }
-    .st-key-login_left {
-        background: linear-gradient(160deg, #064D66 0%, #2a78d6 100%);
-        min-height: 460px; height: 100%; padding: 48px 30px;
-        display: flex; flex-direction: column; align-items: center; justify-content: center; text-align: center;
-    }
-    .login-logo-pill {
-        background: #FFFFFF; color: #064D66; border-radius: 12px; padding: 14px 18px;
-        display: inline-flex; align-items: center; justify-content: center; gap: 10px; margin-bottom: 22px;
-        box-shadow: 0 6px 18px rgba(0, 0, 0, .18); max-width: 100%; box-sizing: border-box;
-        font-weight: 700; font-size: 15px;
-    }
-    .login-logo-pill img { height: 26px; width: auto; display: block; }
-    .login-brand-sub { color: rgba(255, 255, 255, .88); font-size: 12px; line-height: 1.65; max-width: 220px; margin: 0 auto; text-align: center; }
-    .st-key-login_right { padding: 48px 44px; min-height: 460px; height: 100%; display: flex; flex-direction: column; justify-content: center; }
-    .login-form-title { font-size: 18px; font-weight: 600; color: #111110; margin: 0 0 4px; line-height: 1.4; }
-    .login-form-sub { font-size: 12.5px; color: #6b6b68; margin: 0 0 22px; line-height: 1.5; }
-    .st-key-login_right div[data-testid="stButton"] button {
-        background: linear-gradient(160deg, #064D66 0%, #2a78d6 100%) !important; border: none !important;
-        font-weight: 600 !important; border-radius: 8px !important; padding: 10px 0 !important;
-    }
-    .st-key-login_right div[data-testid="stButton"] button p { color: #FFFFFF !important; }
-    .st-key-login_right div[data-testid="stButton"] button:hover { filter: brightness(1.08); }
-
-    /* Listas HTML (Detalhamento, Extremos, Job Matching) — st.dataframe não
-    permite desenhar uma barrinha fina/arredondada com preenchimento parcial
-    por linha, só texto ou cor sólida de fundo por célula; por isso essas
-    tabelas viraram HTML puro, com a "barrinha de progresso" desenhada à mão. */
-    .htbl-wrap { overflow-y: auto; overflow-x: auto; border: 1px solid #E3E6EA; border-radius: 8px; }
-    .htbl-row { display: flex; align-items: center; gap: 10px; padding: 7px 12px; border-bottom: 1px solid #F0F2F5; font-size: 13px; color: #232323; }
-    .htbl-row.htbl-head { position: sticky; top: 0; background: #EDF1F3; font-weight: 700; color: #475569; font-size: 12px; z-index: 1; border-bottom: 1px solid #E3E6EA; }
-    .htbl-row:not(.htbl-head):hover { background: #F8FAFB; }
-    .htbl-cell { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-    </style>
-    """,
-    unsafe_allow_html=True,
-)
-
-auth.init_db()
-auth.require_login()
-auth.exigir_acesso_ao_painel("aderencia")  # matriz de acessos (acesso.v_permissoes)
-
-# imagem pronta (gerada com a fonte do Windows): no Streamlit Cloud, gerar na hora dava nome minúsculo
-_pronto = Path(__file__).parent / "assets" / "logo-wordmark.png"
-wordmark = str(_pronto) if _pronto.exists() else _build_logo_wordmark(LOGO_PATH, "Aderência Salarial")
-st.logo(wordmark if wordmark is not None else LOGO_PATH, icon_image=LOGO_PATH, size="large")
-
-
-def _neon_database_url() -> str | None:
-    try:
-        return st.secrets["neon"]["database_url"]
-    except Exception:
-        return os.getenv("NEON_DATABASE_URL")
-
-
-_MOCK_NIVEL_POR_FUNCAO = {
-    "Analista": "Staff",
-    "Engenheiro": "Supervisor/Advogado/Engenheiro",
-    "Encarregado": "Staff",
-    "Assistente": "Operacional",
-    "Auxiliar": "Operacional",
-    "Coordenador": "Coordenador/Especialista",
-    "Ajudante": "Operacional",
-    "Gerente": "Gerente",
-}
-
-
-def _make_mock_data() -> tuple[pd.DataFrame, pd.DataFrame]:
-    """Demonstração determinística — só usada quando o Neon está fora do ar."""
-    rng = np.random.default_rng(7)
-    cargos = [
-        ("Analista Financeiro Junior", "Diretoria Adm. Financeira e RI", "Financeiro", "Corporativo", "Analista", 4200),
-        ("Analista Financeiro Pleno", "Diretoria Adm. Financeira e RI", "Financeiro", "Corporativo", "Analista", 6200),
-        ("Engenheiro Civil Junior", "Diretoria de Obras 1", "Obras SP", "Obras", "Engenheiro", 8500),
-        ("Encarregado de Obras", "Diretoria de Obras 1", "Obras SP", "Obras", "Encarregado", 4900),
-        ("Assistente Técnico", "Diretoria de Obras 2", "Obras MT", "Obras", "Assistente", 5100),
-        ("Analista de Sistemas Pleno", "Diretoria Adm. Financeira e RI", "Tecnologia da Informação", "Corporativo", "Analista", 7100),
-        ("Auxiliar de Cobrança", "Diretoria Adm. Financeira e RI", "Cobrança", "Corporativo", "Auxiliar", 2500),
-        ("Coordenador de Vendas", "Diretoria Comercial", "Vendas", "Comercial", "Coordenador", 9800),
-        ("Ajudante Geral", "Diretoria de Obras 1", "Obras SP", "Obras", "Ajudante", 2450),
-        ("Gerente de Projetos", "Diretoria de Planejamento", "Planejamento", "Corporativo", "Gerente", 15500),
-    ]
-    people_rows, ref_rows = [], []
-    bases = ["GRH ECI - Acima de 1000 Colaboradores", "Indústria da Construção", "Sudeste SP - Grande São Paulo"]
-    now = pd.Timestamp.now()
-    for cargo, diretoria, area, categoria, funcao, adequado in cargos:
-        for base in bases:
-            variacao = rng.normal(0, 0.04)
-            ref_rows.append(
-                {
-                    "cargo_empresa": cargo,
-                    "cargo_pesquisa": cargo,
-                    "base_pesquisa": base,
-                    "salario_adequado": round(adequado * (1 + variacao), 2),
-                    "salario_minimo": None,
-                    "salario_maximo": None,
-                    "data_retirada": None,
-                    "loaded_at": now,
-                }
-            )
-        n = int(rng.integers(1, 40))
-        salarios = adequado * rng.normal(0.92, 0.16, n).clip(0.4, 1.9)
-        for i, salario in enumerate(salarios):
-            people_rows.append(
-                {
-                    "id_funcionario": f"{cargo[:3]}-{i}",
-                    "nome_funcionario": f"Colaborador {cargo[:3]}{i}",
-                    "descricao_cargo": cargo,
-                    "funcao_cargo": funcao,
-                    "nivel_cargo": "40",
-                    "gerenciamento_nivel_cargo": _MOCK_NIVEL_POR_FUNCAO.get(funcao, "Staff"),
-                    "centro_de_custo": None,
-                    "descricao_posicao": None,
-                    "nome_diretoria": diretoria,
-                    "nome_area": area,
-                    "categoria_atribuicao": categoria,
-                    "salario": round(float(salario), 2),
-                    "loaded_at": now,
-                }
-            )
-    return pd.DataFrame(people_rows), pd.DataFrame(ref_rows)
-
-
-@st.cache_data(ttl="15m", show_spinner="Carregando dados de posicionamento salarial...")
-def load_data() -> tuple[pd.DataFrame, pd.DataFrame, str]:
-    """Pessoas ativas + referência de mercado, ambas do Neon (schema `interno`).
-
-    `fato_funcionario_ativo` é o mirror pessoa a pessoa do Databricks (ver painel
-    Headcount, etl/mirror_fatos_to_neon.py). `mercado_salarial_muller` é a
-    referência de mercado carregada por etl/upload_faixas_salariais.py a partir
-    do consolidado Carreira Muller. Cai pro mock local se a conexão falhar.
-    """
-    database_url = _neon_database_url()
-    if database_url:
+@st.cache_data(ttl=600, show_spinner="Carregando dados…")
+def carregar() -> tuple[pd.DataFrame, pd.DataFrame, datetime | None]:
+    with psycopg2.connect(st.secrets["neon"]["database_url"], connect_timeout=10) as conn:
+        pessoas = pd.read_sql("""SELECT id_funcionario, nome_funcionario, descricao_cargo, funcao_cargo, gerenciamento_nivel_cargo,
+                                        centro_de_custo::text AS centro_de_custo, nome_centro_custo, descricao_posicao,
+                                        categoria_atribuicao, salario, data_admissao, data_referencia
+                                 FROM core_view.funcionario_ativo WHERE salario IS NOT NULL AND salario > 0""", conn)
+        mercado = pd.read_sql("""SELECT cargo_empresa, cargo_pesquisa, base_pesquisa, salario_adequado, salario_minimo,
+                                        salario_maximo, data_retirada, loaded_at FROM mercado.mercado_salarial_muller""", conn)
         try:
-            import psycopg2
-
-            with psycopg2.connect(database_url) as connection:
-                people = pd.read_sql(
-                    f"""
-                    SELECT id_funcionario, nome_funcionario, descricao_cargo, funcao_cargo, nivel_cargo,
-                           gerenciamento_nivel_cargo, centro_de_custo, descricao_posicao,
-                           nome_diretoria, nome_area, categoria_atribuicao, salario, loaded_at
-                    FROM {PEOPLE_TABLE}
-                    WHERE salario IS NOT NULL AND salario > 0
-                    """,
-                    connection,
-                )
-                reference = pd.read_sql(
-                    f"""
-                    SELECT cargo_empresa, cargo_pesquisa, base_pesquisa, salario_adequado,
-                           salario_minimo, salario_maximo, data_retirada, loaded_at
-                    FROM {MARKET_TABLE}
-                    """,
-                    connection,
-                )
-            return people, reference, "Neon"
-        except Exception as exc:
-            print(f"[posicionamento] Neon connection failed, falling back to mock: {exc}")
-    people, reference = _make_mock_data()
-    return people, reference, "Mock local"
+            carga = pd.read_sql("SELECT max(concluido_em) AS c FROM ops.v_ultima_carga WHERE schema_nome = 'core' AND tabela = 'fato_funcionario'", conn)["c"][0]
+        except Exception:  # noqa: BLE001 — sem permissão no registro de cargas, usa a data da base
+            carga = None
+    res = [mapping_diretoria.resolve_diretoria_area(c, p, i) for c, p, i in
+           zip(pessoas["centro_de_custo"], pessoas["descricao_posicao"], pessoas["id_funcionario"])]
+    pessoas["diretoria"], pessoas["area"] = zip(*res) if res else ([], [])
+    ref = pd.to_datetime(pessoas["data_referencia"]).max().date()
+    return m.preparar_pessoas(pessoas, ref), mercado, carga
 
 
-def format_currency(value: float) -> str:
-    if pd.isna(value):
+def _int(v) -> str:
+    return "—" if v is None or pd.isna(v) else f"{int(round(v)):,}".replace(",", ".")
+
+
+def _reais(v) -> str:
+    return "—" if v is None or pd.isna(v) else "R$ " + f"{v:,.0f}".replace(",", ".")
+
+
+def _reais_curto(v) -> str:
+    if v is None or pd.isna(v):
         return "—"
-    return f"R$ {value:,.0f}".replace(",", ".")
+    if abs(v) >= 1e6:
+        return f"R$ {v / 1e6:.1f} mi".replace(".", ",")
+    if abs(v) >= 1e3:
+        return f"R$ {v / 1e3:.0f} mil".replace(".", ",")
+    return _reais(v)
 
 
-def format_number(value: float | int) -> str:
-    return f"{int(round(value)):,}".replace(",", ".")
+def _cr(pct) -> str:
+    """Compa-ratio em razão, a partir do % do adequado (91 -> "0,91")."""
+    return "—" if pct is None or pd.isna(pct) else f"{pct / 100:.2f}".replace(".", ",")
 
 
-def _excel_download_button(df: pd.DataFrame, label: str, file_name: str, key: str) -> None:
-    """Botão de exportar em Excel de verdade (.xlsx via openpyxl, já na
-    lista de dependências), não um CSV com outro nome — pedido em todas as
-    tabelas do painel. Exporta exatamente o recorte exibido (já filtrado/
-    ordenado), não a base inteira."""
-    buffer = io.BytesIO()
-    df.to_excel(buffer, index=False, engine="openpyxl")
-    st.download_button(
-        label,
-        data=buffer.getvalue(),
-        file_name=file_name,
-        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-        key=key,
-    )
+def _pct(v, casas=0) -> str:
+    return "—" if v is None or pd.isna(v) else f"{v * 100:.{casas}f}%".replace(".", ",")
 
 
-def _ordered_options(values: pd.Series) -> list[str]:
-    return sorted(set(values.dropna()))
-
-
-def _dist_ideal(pct) -> "pd.Series | float":
-    """0 dentro da faixa ideal (80%-120%); cresce simetricamente pra qualquer
-    lado a partir daí — mesma métrica usada nas bolinhas do gráfico, na barra
-    de "% do adequado" do Detalhamento e no indicador de aderência do Job
-    Matching, pra manter uma única régua visual de "quão longe do ideal"."""
-    return np.maximum(PISO_IDEAL - pct, 0) + np.maximum(pct - TETO_IDEAL, 0)
-
-
-def _classificar(pct) -> "pd.Series | str":
-    return np.select([pct < PISO_IDEAL, pct > TETO_IDEAL], ["Abaixo", "Acima"], default="Dentro")
-
-
-def _severity_color(pct: float) -> str:
-    """Gradiente contínuo azul -> vermelho, usado só para quem está FORA da
-    faixa ideal: parte do próprio BRAND_COLOR bem na borda da faixa (mesmo
-    tom de quem está "dentro" — sem costura na transição) e vai ficando mais
-    vermelho quanto maior a distância."""
+def _cor_ponto(pct: float) -> str:
+    """Azul dentro da faixa ideal; fora dela, do azul ao vermelho conforme a distância."""
     if pd.isna(pct):
         return "#9AA3AE"
-    t = min(_dist_ideal(pct), DIST_MAX) / DIST_MAX
-    lr, lg, lb = 0x06, 0x4D, 0x66  # BRAND_COLOR
-    dr, dg, db = 0xD0, 0x3B, 0x3B  # RED
-    r = round(lr + (dr - lr) * t)
-    g = round(lg + (dg - lg) * t)
-    b = round(lb + (db - lb) * t)
-    return f"#{r:02x}{g:02x}{b:02x}"
+    if m.PISO_IDEAL <= pct <= m.TETO_IDEAL:
+        return AZUL
+    dist = max(m.PISO_IDEAL - pct, 0) + max(pct - m.TETO_IDEAL, 0)
+    t = min(dist, 20) / 20
+    a, b = (0x06, 0x4D, 0x66), (0xD0, 0x3B, 0x3B)
+    return "#" + "".join(f"{round(x + (y - x) * t):02x}" for x, y in zip(a, b))
 
 
-def _dot_color(pct: float) -> str:
-    """Cor das bolinhas do gráfico e (indiretamente) dos blocos das barrinhas
-    de aderência: azul sólido, sem gradiente, pra quem está dentro da faixa
-    ideal (80%-120%) — corte categórico, não sequencial, pedido explicitamente
-    pelo usuário; fora da faixa, vermelho sequencial por distância."""
-    if pd.isna(pct):
-        return "#9AA3AE"
-    if PISO_IDEAL <= pct <= TETO_IDEAL:
-        return BRAND_COLOR
-    return _severity_color(pct)
-
-
-BAR_SCALE_MAX = 200.0  # eixo 0%-200% — mesmo teto do ProgressColumn original
-BAR_TRACK_COLOR = "#E3E6EA"
-BAR_MARKER_COLOR = "#94A3B8"
-
-
-def _render_html_meter(pct: float, width_px: int = 130) -> str:
-    """Barrinha de progresso fina e arredondada (HTML/CSS puro): trilho cinza
-    claro, preenchimento colorido (azul dentro da faixa ideal, vermelho fora
-    — mesma régua de `_dot_color`) até a posição de `pct` no eixo 0%-200%, e
-    3 marcadores fixos (80%/100%/120%) — mesmas referências das linhas verdes
-    e da linha tracejada do gráfico de dispersão. `st.dataframe` (a tabela
-    nativa) só permite texto puro ou uma cor sólida de fundo por célula — não
-    dá pra desenhar isso ali, por isso as tabelas com essa barra usam
-    `_render_html_table` (HTML puro) em vez de `st.dataframe`."""
+def _medidor(pct: float, largura: int = 130) -> str:
+    """Barrinha de compa-ratio 0 a 2,00 com marcas em 0,80, 1,00 e 1,20 (mesma régua do gráfico)."""
     if pd.isna(pct):
         return "—"
-    color = _dot_color(pct)
-    fill_pct = max(0.0, min(100.0, pct / BAR_SCALE_MAX * 100))
-    dots = "".join(
-        f'<span style="position:absolute;left:{marker / BAR_SCALE_MAX * 100:.2f}%;top:50%;'
-        f'transform:translate(-50%,-50%);width:5px;height:5px;border-radius:50%;'
-        f'background:{BAR_MARKER_COLOR};"></span>'
-        for marker in (PISO_IDEAL, 100, TETO_IDEAL)
-    )
-    return (
-        '<div style="display:flex;align-items:center;gap:8px;">'
-        f'<div style="position:relative;width:{width_px}px;height:6px;background:{BAR_TRACK_COLOR};'
-        'border-radius:999px;flex-shrink:0;">'
-        f'<div style="position:absolute;left:0;top:0;height:100%;width:{fill_pct:.1f}%;'
-        f'background:{color};border-radius:999px;"></div>'
-        f"{dots}"
-        "</div>"
-        f'<span style="font-size:12.5px;font-weight:600;white-space:nowrap;">{pct:.0f}%</span>'
-        "</div>"
-    )
+    fill = max(0.0, min(100.0, pct / 200 * 100))
+    marcas = "".join(f'<span style="position:absolute;left:{x / 2:.1f}%;top:50%;transform:translate(-50%,-50%);width:5px;height:5px;'
+                     f'border-radius:50%;background:#94A3B8"></span>' for x in (80, 100, 120))
+    return (f'<div style="display:flex;align-items:center;gap:8px"><div style="position:relative;width:{largura}px;height:6px;'
+            f'background:#E3E6EA;border-radius:999px;flex-shrink:0"><div style="position:absolute;left:0;top:0;height:100%;'
+            f'width:{fill:.1f}%;background:{_cor_ponto(pct)};border-radius:999px"></div>{marcas}</div>'
+            f'<span style="font-size:12.5px;font-weight:700">{_cr(pct)}</span></div>')
 
 
-def _html_cell_value(col: dict, value) -> str:
-    kind = col.get("kind", "text")
-    if kind == "bar":
-        return _render_html_meter(value, width_px=col.get("bar_width", 130))
-    if pd.isna(value):
-        text = "—"
-    elif kind == "currency":
-        text = format_currency(value)
-    elif kind == "int":
-        text = format_number(value)
+def tabela_html(df: pd.DataFrame, colunas: list[tuple], altura: int = 420) -> None:
+    """Tabela em HTML (a barrinha de compa-ratio não cabe no st.dataframe). colunas: (campo, rótulo, largura, tipo)."""
+    def celula(v, tipo):
+        if tipo == "barra":
+            return _medidor(v)
+        if tipo == "reais":
+            return _reais(v)
+        if tipo == "int":
+            return _int(v)
+        return html_lib.escape("—" if v is None or (isinstance(v, float) and pd.isna(v)) else str(v))
+    def estilo(larg, tipo):
+        return (f"flex:0 0 {larg}px;" if larg else "flex:1 1 0;min-width:150px;") + ("text-align:right;" if tipo in ("reais", "int") else "")
+    cab = "".join(f'<div class="htbl-cell" style="{estilo(l, t)}">{html_lib.escape(r)}</div>' for _, r, l, t in colunas)
+    linhas = "".join('<div class="htbl-row">' + "".join(f'<div class="htbl-cell" style="{estilo(l, t)}">{celula(row[c], t)}</div>'
+                                                        for c, _, l, t in colunas) + "</div>" for _, row in df.iterrows())
+    st.html(f'<div class="htbl-wrap" style="max-height:{altura}px"><div class="htbl-row htbl-head">{cab}</div>{linhas}</div>')
+
+
+def excel(df: pd.DataFrame, rotulo: str, arquivo: str, key: str, filtros: dict) -> None:
+    """Botão de exportação; a planilha só é montada quando alguém clica (não pesa nas outras interações)."""
+    linhas = [(k, ", ".join(map(str, v)) if isinstance(v, (list, tuple)) else v) for k, v in filtros.items() if v]
+
+    def gerar() -> bytes:
+        buf = io.BytesIO()
+        with pd.ExcelWriter(buf, engine="openpyxl") as xl:
+            df.to_excel(xl, sheet_name="Dados", index=False)
+            pd.DataFrame([("Gerado em", f"{datetime.now():%d/%m/%Y %H:%M}")] + linhas,
+                         columns=["Filtro", "Valor"]).to_excel(xl, sheet_name="Filtros", index=False)
+        return buf.getvalue()
+
+    st.download_button(rotulo, gerar, arquivo, "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                       key=key, icon=":material/download:")
+
+
+# ----------------------------------------------------------------------------- gráficos
+
+def dispersao(d: pd.DataFrame) -> dict:
+    pts = d.assign(cor=[_cor_ponto(p) for p in d["pct"]], y=d["pct"].clip(FAIXA_MIN, FAIXA_MAX),
+                   sal_txt=[_reais(v) for v in d["salario"]], adeq_txt=[_reais(v) for v in d["salario_adequado"]],
+                   pct_txt=[_cr(v) for v in d["pct"]])[
+        ["salario", "y", "cor", "nome_funcionario", "descricao_cargo", "diretoria", "area", "sal_txt", "adeq_txt", "pct_txt", "base_usada"]]
+    y = {"field": "y", "type": "quantitative", "scale": {"domain": [FAIXA_MIN, FAIXA_MAX]},
+         "axis": {"title": "Compa-ratio (salário ÷ adequado)", "labelExpr": "replace(format(datum.value / 100, '.2f'), '.', ',')", "grid": True}}
+    return {"layer": [
+        {"data": {"values": [{"y": 80}, {"y": 120}]}, "mark": {"type": "rule", "color": VERDE, "strokeWidth": 2},
+         "encoding": {"y": {"field": "y", "type": "quantitative", "scale": {"domain": [FAIXA_MIN, FAIXA_MAX]}}}},
+        {"data": {"values": [{"y": 100}]}, "mark": {"type": "rule", "color": CINZA, "strokeDash": [5, 4], "strokeWidth": 1.5},
+         "encoding": {"y": {"field": "y", "type": "quantitative", "scale": {"domain": [FAIXA_MIN, FAIXA_MAX]}}}},
+        {"data": {"values": pts.to_dict("records")}, "params": [{"name": "zoom", "select": "interval", "bind": "scales"}],
+         "mark": {"type": "circle", "size": 60, "opacity": .75, "stroke": "#FFFFFF", "strokeWidth": .4},
+         "encoding": {"x": {"field": "salario", "type": "quantitative", "scale": {"zero": False},
+                            "axis": {"title": "Salário mensal", "grid": True, "labelExpr": "'R$ ' + replace(format(datum.value, ',.0f'), ',', '.')"}},
+                      "y": y, "color": {"field": "cor", "type": "nominal", "scale": None},
+                      "tooltip": [{"field": "nome_funcionario", "title": "Colaborador"}, {"field": "descricao_cargo", "title": "Cargo"},
+                                  {"field": "diretoria", "title": "Diretoria"}, {"field": "area", "title": "Área"},
+                                  {"field": "sal_txt", "title": "Salário"}, {"field": "adeq_txt", "title": "Adequado (mercado)"},
+                                  {"field": "pct_txt", "title": "Compa-ratio"}, {"field": "base_usada", "title": "Base usada"}]}},
+    ]}
+
+
+def barras_classe(t: pd.DataFrame, campo: str) -> dict:
+    """Barras 100% empilhadas Abaixo / Dentro / Acima, com o % em cada parte."""
+    d = t.assign(ordem=t["classificacao"].map({"Abaixo": 0, "Dentro": 1, "Acima": 2}),
+                 txt=[_pct(p) if p >= .06 else "" for p in t["pct"]], cor_txt="#FFFFFF")
+    ordem_y = list(dict.fromkeys(d.sort_values("ordem_y")[campo])) if "ordem_y" in d else list(dict.fromkeys(d[campo]))
+    y = {"field": campo, "type": "nominal", "sort": ordem_y, "axis": {"title": None, "labelLimit": 220}}
+    xq = {"field": "pessoas", "type": "quantitative", "stack": "normalize"}
+    return {"data": {"values": d.to_dict("records")}, "layer": [
+        {"mark": {"type": "bar"}, "encoding": {"y": y, "x": {**xq, "axis": {"format": ".0%", "grid": True, "title": None}},
+                                               "order": {"field": "ordem"},
+                                               "color": {"field": "classificacao", "scale": {"domain": list(COR_CLASSE), "range": list(COR_CLASSE.values())},
+                                                         "legend": {"orient": "top"}},
+                                               "tooltip": [{"field": campo, "title": " "}, {"field": "classificacao", "title": "Classificação"},
+                                                           {"field": "pessoas", "title": "Pessoas"}, {"field": "pct", "title": "%", "format": ".1%"}]}},
+        {"mark": {"type": "text", "fontSize": 11, "fontWeight": 800, "color": "#FFFFFF"},
+         "encoding": {"y": y, "x": {**xq, "bandPosition": .5}, "order": {"field": "ordem"}, "text": {"field": "txt"}}},
+    ]}
+
+
+def mapa_calor(t: pd.DataFrame, linhas: str, colunas: str, ordem_col: list[str]) -> dict:
+    d = t.assign(txt=[_pct(p) for p in t["dentro"]], compa_txt=[_cr(v) for v in t["compa"]],
+                 claro=[p < .45 or p > .8 for p in t["dentro"]])
+    x = {"field": colunas, "type": "nominal", "sort": ordem_col, "axis": {"title": None, "labelAngle": 0, "labelLimit": 150, "orient": "top", "labelExpr": "split(replace(datum.label, '/', '/|'), '|')"}}
+    y = {"field": linhas, "type": "nominal", "axis": {"title": None, "labelLimit": 220}}
+    return {"data": {"values": d.to_dict("records")}, "layer": [
+        {"mark": {"type": "rect", "stroke": "#FFFFFF", "strokeWidth": 2, "cornerRadius": 3},
+         "encoding": {"x": x, "y": y, "color": {"field": "dentro", "type": "quantitative", "title": "% dentro da faixa",
+                                                "scale": {"domain": [.3, .65, 1], "range": [VERMELHO, AMARELO, VERDE]},
+                                                "legend": {"orient": "right", "format": ".0%"}},
+                      "tooltip": [{"field": linhas, "title": "Diretoria"}, {"field": colunas, "title": "Nível"},
+                                  {"field": "pessoas", "title": "Pessoas"}, {"field": "dentro", "title": "% dentro", "format": ".0%"},
+                                  {"field": "compa_txt", "title": "Compa-ratio mediano"}]}},
+        {"mark": {"type": "text", "fontSize": 12, "fontWeight": 800},
+         "encoding": {"x": x, "y": y, "text": {"field": "txt"},
+                      "color": {"condition": {"test": "datum.claro", "value": "#FFFFFF"}, "value": CINZA_ESCURO}}},
+    ]}
+
+
+def histograma_penetracao(d: pd.DataFrame) -> dict:
+    faixas = [(-1e9, 0, "Abaixo do mínimo"), (0, 25, "0,00–0,25"), (25, 50, "0,25–0,50"), (50, 75, "0,50–0,75"), (75, 100, "0,75–1,00"), (100, 1e9, "Acima do máximo")]
+    linhas = [{"faixa": r, "pessoas": int(((d["penetracao"] >= a) & (d["penetracao"] < b)).sum()), "ordem": i}
+              for i, (a, b, r) in enumerate(faixas)]
+    tot = sum(x["pessoas"] for x in linhas) or 1
+    for x in linhas:
+        x["txt"] = f"{_int(x['pessoas'])} ({_pct(x['pessoas'] / tot)})"
+        x["cor"] = VERMELHO if x["ordem"] == 0 else LARANJA if x["ordem"] == 5 else AZUL
+    xa = {"field": "faixa", "type": "nominal", "sort": [f[2] for f in faixas], "axis": {"labelAngle": 0, "title": None}}
+    return {"data": {"values": linhas}, "layer": [
+        {"mark": {"type": "bar", "cornerRadiusTopLeft": 4, "cornerRadiusTopRight": 4},
+         "encoding": {"x": xa, "y": {"field": "pessoas", "type": "quantitative", "axis": {"grid": True, "title": None}},
+                      "color": {"field": "cor", "type": "nominal", "scale": None}, "tooltip": [{"field": "faixa"}, {"field": "txt", "title": "Pessoas"}]}},
+        {"mark": {"type": "text", "dy": -8, "fontSize": 11, "fontWeight": 700, "color": CINZA_ESCURO},
+         "encoding": {"x": xa, "y": {"field": "pessoas", "type": "quantitative"}, "text": {"field": "txt"}}},
+    ], "padding": {"top": 14}}
+
+
+def barras_valor(t: pd.DataFrame, campo: str, valor: str, texto: str, cor: str = AZUL, limite: int = 230) -> dict:
+    y = {"field": campo, "type": "nominal", "sort": list(t[campo]), "axis": {"title": None, "labelLimit": limite}}
+    xq = {"field": valor, "type": "quantitative", "axis": None}
+    return {"data": {"values": t.to_dict("records")}, "layer": [
+        {"mark": {"type": "bar", "cornerRadiusEnd": 4, "color": cor}, "encoding": {"y": y, "x": xq, "tooltip": [{"field": campo, "title": " "}, {"field": texto, "title": "Valor"}]}},
+        {"mark": {"type": "text", "align": "left", "dx": 5, "fontSize": 11, "fontWeight": 700, "color": cor}, "encoding": {"y": y, "x": xq, "text": {"field": texto}}},
+    ], "padding": {"right": 60}}
+
+
+def compa_tempo(t: pd.DataFrame) -> dict:
+    d = t.assign(txt=[_cr(c) for c in t["compa"]], rot=[f"{f}|{_int(n)} pess." for f, n in zip(t["faixa_tempo"], t["pessoas"])])
+    x = {"field": "rot", "type": "nominal", "sort": list(d["rot"]), "axis": {"labelAngle": 0, "title": None, "labelExpr": "split(datum.label, '|')"}}
+    y = {"field": "compa", "type": "quantitative", "scale": {"domain": [0, 115]}, "axis": {"grid": True, "title": None, "labelExpr": "replace(format(datum.value / 100, '.2f'), '.', ',')"}}
+    return {"layer": [
+        {"data": {"values": [{"y": 80}]}, "mark": {"type": "rule", "color": VERDE, "strokeDash": [4, 4]}, "encoding": {"y": {"field": "y", "type": "quantitative", "scale": {"domain": [0, 115]}}}},
+        {"data": {"values": d.to_dict("records")}, "mark": {"type": "bar", "color": AZUL, "cornerRadiusTopLeft": 4, "cornerRadiusTopRight": 4},
+         "encoding": {"x": x, "y": y, "tooltip": [{"field": "faixa_tempo", "title": "Tempo de casa"}, {"field": "pessoas", "title": "Pessoas"},
+                                                   {"field": "txt", "title": "Compa-ratio mediano"}]}},
+        {"data": {"values": d.to_dict("records")}, "mark": {"type": "text", "dy": -8, "fontSize": 12, "fontWeight": 800, "color": CINZA_ESCURO},
+         "encoding": {"x": x, "y": y, "text": {"field": "txt"}}},
+    ], "padding": {"top": 14}}
+
+
+def cobertura(pct_com: float) -> dict:
+    d = [{"s": "Com referência", "ini": 0, "fim": pct_com, "meio": pct_com / 2, "txt": _pct(pct_com), "cor": AZUL},
+         {"s": "Sem referência", "ini": pct_com, "fim": 1, "meio": (1 + pct_com) / 2, "txt": _pct(1 - pct_com), "cor": "#94A3B8"}]
+    return {"data": {"values": d}, "height": 34, "layer": [
+        {"mark": {"type": "bar", "height": 30, "cornerRadius": 4}, "encoding": {"x": {"field": "ini", "type": "quantitative", "scale": {"domain": [0, 1]}, "axis": None},
+                                                                                  "x2": {"field": "fim"}, "color": {"field": "cor", "type": "nominal", "scale": None},
+                                                                                  "tooltip": [{"field": "s", "title": " "}, {"field": "txt", "title": "%"}]}},
+        {"mark": {"type": "text", "fontSize": 12, "fontWeight": 800, "color": "#FFFFFF"}, "encoding": {"x": {"field": "meio", "type": "quantitative"}, "text": {"field": "txt"}}},
+    ]}
+
+
+# ----------------------------------------------------------------------------- página
+
+try:
+    pessoas, mercado, carga = carregar()
+except Exception as exc:  # noqa: BLE001
+    st.error("Não consegui ler a base do Neon. Confira o bloco [neon] em .streamlit/secrets.toml.", icon=":material/error:")
+    st.caption(type(exc).__name__)
+    st.stop()
+
+ref = pd.to_datetime(pessoas["data_referencia"]).max().date()
+pp.logo(ICONE, "Aderência Salarial")
+navegacao = st.navigation([
+    st.Page(lambda: pagina_pessoas(), title="Analítico", icon=":material/scatter_plot:", url_path="analitico", default=True),
+    st.Page(lambda: pagina_geral(), title="Defasagem e Enquadramento", icon=":material/insights:", url_path="defasagem-e-enquadramento"),
+    st.Page(lambda: pagina_cargos(), title="Cargo e Mercado", icon=":material/work:", url_path="cargo-e-mercado"),
+])
+bases = sorted(mercado["base_pesquisa"].dropna().unique())
+opcoes = lambda c: sorted(pessoas[c].dropna().unique())  # noqa: E731
+mercado_em = mercado["loaded_at"].max() if len(mercado) else None
+
+with pp.barra_lateral(fonte="Neon + Databricks + Carreira Muller", atualizado_em=carga or ref,
+                      extra={"Mercado": pp._formatar(mercado_em) if mercado_em is not None and pd.notna(mercado_em) else "—"}):
+    st.markdown("**Pesquisa de mercado**")
+    base = st.selectbox("Base de pesquisa", [PERSONALIZADO] + bases, label_visibility="collapsed",
+                        help="Personalizado: cada cargo usa a primeira base da lista que tem referência para ele.")
+    if base == PERSONALIZADO:
+        padrao_usar = [b for b in ORDEM_PADRAO if b in bases]
+        caixas = sort_items([{"header": "Usar, nesta ordem (arraste)", "items": padrao_usar},
+                             {"header": "Não usar", "items": [b for b in bases if b not in padrao_usar]}],
+                            multi_containers=True, direction="vertical", custom_style=CSS_ARRASTAR, key="ordem_bases")
+        ordem_bases = caixas[0]["items"] if caixas else padrao_usar
+        if not ordem_bases:
+            st.warning("Arraste ao menos uma base para \"Usar\".", icon=":material/warning:")
+            ordem_bases = padrao_usar
+        st.caption("Se a 1ª base não tem o cargo, usa a 2ª, e assim por diante.")
     else:
-        text = html_lib.escape(str(value))
-    weight = "700" if col.get("bold_if_one") and value == 1 else "400"
-    return f'<span style="font-weight:{weight};">{text}</span>'
-
-
-def _cell_style(col: dict) -> str:
-    """`flex-shrink:0` + `min-width` em toda célula — sem isso, uma tabela
-    com muitas colunas espreme as flexíveis (Cargo, Diretoria...) até truncar
-    ilegível em vez de rolar horizontalmente (bug visto em teste real)."""
-    flex = col["flex"]
-    min_w = col.get("min_width")
-    if min_w is None and not flex.startswith("0 0"):
-        min_w = 140  # coluna "livre" (Cargo, Diretoria...) sem largura fixa própria
-    style = f"flex:{flex};text-align:{col.get('align', 'left')};flex-shrink:0;"
-    if min_w:
-        style += f"min-width:{min_w}px;"
-    return style
-
-
-def _render_html_table(df: pd.DataFrame, columns: list[dict], max_height: int = 480) -> None:
-    """Tabela em HTML puro (sem `st.dataframe`) — único jeito de desenhar a
-    barrinha de progresso por linha (ver `_render_html_meter`). Cada item de
-    `columns`: {"key": coluna no df, "label": cabeçalho, "flex": tamanho
-    flexbox, "align": "left"/"right", "kind": "text"/"currency"/"int"/"bar",
-    "bold_if_one": True (negrita o valor quando == 1, pra "Qtd."),
-    "min_width": largura mínima em px (opcional, tem um padrão razoável)}."""
-    row_min_width = sum(
-        float(c["min_width"]) if c.get("min_width") is not None
-        else float(c["flex"].split()[-1].rstrip("px")) if c["flex"].startswith("0 0")
-        else 140
-        for c in columns
-    )
-    header = "".join(f'<div class="htbl-cell" style="{_cell_style(c)}">{html_lib.escape(c["label"])}</div>' for c in columns)
-    rows = []
-    for _, row in df.iterrows():
-        cells = "".join(
-            f'<div class="htbl-cell" style="{_cell_style(c)}">{_html_cell_value(c, row[c["key"]])}</div>' for c in columns
-        )
-        rows.append(f'<div class="htbl-row" style="min-width:{row_min_width:.0f}px;">{cells}</div>')
-    doc = (
-        f'<div class="htbl-wrap" style="max-height:{max_height}px;">'
-        f'<div class="htbl-row htbl-head" style="min-width:{row_min_width:.0f}px;">{header}</div>'
-        + "".join(rows)
-        + "</div>"
-    )
-    st.markdown(doc, unsafe_allow_html=True)
-
-
-def _kpi_card_spec(label: str, value_text: str, value_color: str, subtitle_text: str, subtitle_color: str) -> dict:
-    """Mesmo spec do card de KPI do painel Headcount (ribbon navy + faixa dourada)."""
-
-    def _layer(mark: dict, encoding: dict) -> dict:
-        return {"data": {"values": [{}]}, "mark": mark, "encoding": encoding}
-
-    return {
-        "width": "container",
-        "height": "container",
-        "config": {
-            "autosize": {"type": "fit", "contains": "padding"},
-            "view": {"stroke": None, "fill": "#FFFFFF"},
-            "text": {"font": "sans-serif"},
-        },
-        "layer": [
-            _layer(
-                {"type": "rect", "color": "#FAB900", "tooltip": None},
-                {"x": {"value": 0}, "x2": {"value": {"expr": "width"}}, "y": {"value": {"expr": "height-7"}}, "y2": {"value": {"expr": "height"}}},
-            ),
-            _layer(
-                {"type": "rect", "color": "#064D66", "tooltip": None},
-                {"x": {"value": 0}, "x2": {"value": {"expr": "width"}}, "y": {"value": 0}, "y2": {"value": {"expr": "height*0.20"}}},
-            ),
-            _layer(
-                {"type": "rect", "color": "#FFFFFF", "tooltip": None},
-                {
-                    "x": {"value": {"expr": "width*0.88 - height*0.10"}},
-                    "x2": {"value": {"expr": "width*0.88 + height*0.10 + 1"}},
-                    "y": {"value": 0}, "y2": {"value": {"expr": "height*0.21"}},
-                },
-            ),
-            _layer(
-                {
-                    "type": "point", "shape": "square", "filled": True, "fill": "#FFFFFF",
-                    "color": "#FFFFFF", "stroke": None, "strokeWidth": 0, "opacity": 1, "fillOpacity": 1,
-                    "tooltip": None,
-                },
-                {
-                    "x": {"value": {"expr": "width*0.88 + height*0.15"}},
-                    "y": {"value": {"expr": "height*0.105"}},
-                    "size": {"value": {"expr": "pow(height*0.20, 2)"}},
-                    "angle": {"value": 45},
-                },
-            ),
-            _layer(
-                {
-                    "type": "text", "font": "sans-serif", "color": "#FFFFFF", "fontSize": 10,
-                    "fontWeight": "bold", "align": "left", "baseline": "middle",
-                    "limit": {"expr": "width*0.72 - 14"},
-                },
-                {"x": {"value": 14}, "y": {"value": {"expr": "height*0.10"}}, "text": {"value": label.upper()}},
-            ),
-            _layer(
-                {
-                    "type": "text", "font": "sans-serif", "color": value_color, "fontSize": 30,
-                    "fontWeight": "700", "align": "center", "baseline": "middle",
-                    "limit": {"expr": "width - 12"},
-                },
-                {"x": {"value": {"expr": "width/2"}}, "y": {"value": {"expr": "height*0.55"}}, "text": {"value": value_text}},
-            ),
-            _layer(
-                {
-                    "type": "text", "font": "sans-serif", "color": subtitle_color, "fontSize": 11,
-                    "fontWeight": "600", "align": "center", "baseline": "middle",
-                    "limit": {"expr": "width - 12"},
-                },
-                {"x": {"value": {"expr": "width/2"}}, "y": {"value": {"expr": "height*0.83"}}, "text": {"value": subtitle_text}},
-            ),
-        ],
+        ordem_bases = [base]
+        retirada = mercado.loc[mercado["base_pesquisa"] == base, "data_retirada"].max()
+        if pd.notna(retirada):
+            st.caption(f"Relatório retirado em {pd.Timestamp(retirada):%d/%m/%Y}")
+    st.markdown("**Filtros**")
+    sel = {
+        "diretoria": st.multiselect("Diretoria", opcoes("diretoria"), placeholder="Todas"),
+        "area": st.multiselect("Área", opcoes("area"), placeholder="Todas"),
+        "cc_texto": st.multiselect("Centro de custo", opcoes("cc_texto"), placeholder="Todos"),
+        "nivel": st.multiselect("Nível de gerenciamento", list(pessoas["nivel"].value_counts().index), placeholder="Todos"),
+        "categoria_atribuicao": st.multiselect("Categoria de atribuição", opcoes("categoria_atribuicao"), placeholder="Todas"),
+        "funcao_cargo": st.multiselect("Função de cargo", opcoes("funcao_cargo"), placeholder="Todas"),
     }
 
+rotulos = {"diretoria": "Diretoria", "area": "Área", "cc_texto": "Centro de custo", "nivel": "Nível",
+           "categoria_atribuicao": "Categoria", "funcao_cargo": "Função"}
+ABREV = {"Indústria da Construção": "Indústria", "GRH ECI - Acima de 1000 Colaboradores": "GRH > 1000",
+         "GRH ECI - Ramo Econômico": "GRH Ramo", "GRH ECI - Região Grande São Paulo": "GRH Grande SP",
+         "Sudeste SP - Grande São Paulo": "Sudeste SP"}
+base_txt = base if base != PERSONALIZADO else "Personalizado: " + " → ".join(ABREV.get(b, b) for b in ordem_bases)
+filtros_txt = {"Base de pesquisa": base_txt, **{rotulos[k]: v for k, v in sel.items()}}
 
-def render_kpi_card(label: str, value_text: str, subtitle_text: str, subtitle_color: str = "#6B7280", value_color: str = "#1F2937", height: int = 140) -> None:
-    spec = _kpi_card_spec(label, value_text, value_color, subtitle_text, subtitle_color)
-    card_key = "".join(ch for ch in label if ch.isalnum()).lower()
-    with st.container(key=f"kpi-card-{card_key}"):
-        st.vega_lite_chart(spec, width="stretch", height=height, theme=None, key=f"kpi-vega-{card_key}-{value_text}-{subtitle_text}")
+base_p = pessoas
+for col, vals in sel.items():
+    if vals:
+        base_p = base_p[base_p[col].isin(vals)]
+cruz, sem_ref = m.cruzar(base_p, mercado, ordem_bases)
 
-
-def render_dispersion_chart(data: pd.DataFrame, height: int) -> None:
-    """Mapa de dispersão pessoa a pessoa: salário (x) vs. % do salário adequado
-    de mercado (y), eixo fixo em 60%-140%. Linhas verdes em 80%/120% marcam a
-    faixa ideal de aderência; linha tracejada cinza em 100% marca o adequado.
-    Cor das bolinhas: azul sólido (sem gradiente) pra quem está dentro da
-    faixa ideal — corte categórico, não sequencial, pedido explicitamente;
-    fora da faixa, vermelho sequencial por distância (mais longe, mais
-    vermelho). Sem legenda — a cor já é auto-explicada pelas linhas verdes e
-    pelo texto acima do gráfico. Pontos fora de 60%-140% ficam "grudados" na
-    borda (scale clamp) — contados à parte no rodapé, não descartados
-    silenciosamente."""
-    points = (
-        alt.Chart(data)
-        .mark_circle(size=65, opacity=0.75, stroke="#FFFFFF", strokeWidth=0.4)
-        .encode(
-            x=alt.X("salario:Q", title="Salário mensal (R$)", scale=alt.Scale(zero=False), axis=alt.Axis(format=",.0f")),
-            y=alt.Y("pct:Q", title="% do salário adequado de mercado", scale=alt.Scale(domain=[FAIXA_MIN, FAIXA_MAX], clamp=True)),
-            color=alt.Color("cor:N", scale=None, legend=None),
-            tooltip=[
-                alt.Tooltip("nome_funcionario:N", title="Colaborador"),
-                alt.Tooltip("descricao_cargo:N", title="Cargo"),
-                alt.Tooltip("nome_diretoria:N", title="Diretoria"),
-                alt.Tooltip("nome_area:N", title="Área"),
-                alt.Tooltip("salario:Q", title="Salário", format=",.0f"),
-                alt.Tooltip("salario_adequado:Q", title="Adequado (mercado)", format=",.0f"),
-                alt.Tooltip("pct:Q", title="% do adequado", format=".1f"),
-            ],
-        )
-    )
-    ref_lines = pd.DataFrame({"y": [PISO_IDEAL, 100, TETO_IDEAL], "rotulo": [f"{PISO_IDEAL}%", "Adequado (100%)", f"{TETO_IDEAL}%"]})
-    lines = (
-        alt.Chart(ref_lines)
-        .mark_rule(strokeWidth=2)
-        .encode(
-            # Domínio explícito igual ao dos pontos — sem isso, o Vega-Lite infere o
-            # domínio desta camada a partir só destes 3 valores com "zero: true"
-            # (padrão de escala quantitativa), estende pra [0, 120] e, ao unir com a
-            # escala compartilhada da camada de pontos, o eixo Y acaba virando [0, 140]
-            # em vez do [60, 140] pedido.
-            y=alt.Y("y:Q", scale=alt.Scale(domain=[FAIXA_MIN, FAIXA_MAX])),
-            color=alt.condition(alt.datum.y == 100, alt.value(GRAY), alt.value(GREEN)),
-            strokeDash=alt.condition(alt.datum.y == 100, alt.value([5, 4]), alt.value([1, 0])),
-            tooltip=[alt.Tooltip("rotulo:N", title="Referência")],
-        )
-    )
-    chart = (lines + points).properties(height=height).interactive()
-    st.altair_chart(chart, width="stretch")
+def _faixa(t: pd.DataFrame) -> list[str]:
+    return [f"{_reais(a)} – {_reais(b)}" if round(a) != round(b) else "—" for a, b in zip(t["sal_min"], t["sal_max"])]
 
 
-# Agrupamentos puramente visuais pro gráfico por nível de gerenciamento — menos
-# divisões pra caber sem espremer o eixo. Não muda o dado em si, só como esse
-# gráfico especificamente agrega `gerenciamento_nivel_cargo`.
-NIVEL_GERENCIAMENTO_AGRUPADO = {
-    "Gerente de Vendas": "Gerente",
-    "Gerente Executivo de Obras": "Gerente Executivo",
-    "Coordenador de Obras": "Coordenador/Especialista",
-}
+# ================================================================ páginas
+def pagina_geral() -> None:
+    r = m.resumo(cruz)
+    enq80 = m.custo_enquadramento(cruz, 80)
+    c = st.columns(6)
+    with c[0]:
+        pp.kpi("Colaboradores comparados", _int(r["n"]), f"{_int(sem_ref)} sem referência")
+    with c[1]:
+        pp.kpi("Dentro da faixa ideal", _pct(r["dentro"]), "compa-ratio 0,80 a 1,20", VERDE)
+    with c[2]:
+        pp.kpi("Abaixo da faixa", _pct(r["abaixo"]), "abaixo de 0,80", VERMELHO)
+    with c[3]:
+        pp.kpi("Acima da faixa", _pct(r["acima"]), "acima de 1,20", LARANJA)
+    with c[4]:
+        pp.kpi("Compa-ratio mediano", _cr(r["compa_mediano"] * 100), f"penetração {_cr(r['penetracao_mediana'] * 100)}", ajuda=AJUDA_COMPA)
+    with c[5]:
+        pp.kpi("Custo para enquadrar", _reais_curto(enq80["falta"].sum()), f"/mês · {_int(len(enq80))} pess.", ajuda=AJUDA_ENQ)
 
-# Nomes curtos só pro rótulo do eixo — os originais estouram a largura
-# disponível e o Vega-Lite trunca ("Coordenador/Esp…").
-NIVEL_NOME_CURTO = {
-    "Coordenador/Especialista": "Coord./Especialista",
-    "Supervisor/Advogado/Engenheiro": "Supervisor/Adv./Eng.",
-}
+    pp.secao("1. Onde está a defasagem")
+    niv = cruz.groupby(["nivel", "classificacao"]).size().rename("pessoas").reset_index()
+    niv["pct"] = niv["pessoas"] / niv.groupby("nivel")["pessoas"].transform("sum")
+    geral = cruz.groupby("classificacao").size().rename("pessoas").reset_index().assign(nivel="Geral")
+    geral["pct"] = geral["pessoas"] / geral["pessoas"].sum()
+    dentro_n = niv[niv["classificacao"] == "Dentro"].set_index("nivel")["pct"]
+    ordem_n = ["Geral"] + list(dentro_n.sort_values(ascending=False).index) + [n for n in niv["nivel"].unique() if n not in dentro_n.index]
+    t_niv = pd.concat([geral, niv]).assign(ordem_y=lambda x: x["nivel"].map({n: i for i, n in enumerate(ordem_n)}))
+    g1, g2 = st.columns([4, 8])
+    with g1:
+        pp.grafico("Aderência por nível de gerenciamento", barras_classe(t_niv, "nivel"), 360, SEM_DADOS)
+    with g2:
+        mz = m.matriz(cruz, "diretoria", "nivel")
+        pp.grafico("% dentro da faixa ideal: diretoria × nível", mapa_calor(mz, "diretoria", "nivel", list(cruz["nivel"].value_counts().index)), 400, SEM_DADOS)
+        st.html('<div class="nota">Cada célula: % das pessoas daquele cruzamento dentro da faixa ideal (passe o mouse para ver quantas '
+                'pessoas e o compa-ratio mediano). Vermelho = defasagem concentrada.</div>')
 
-STATUS_ORDER = ["Abaixo", "Dentro", "Acima"]
-STATUS_COLOR = {"Abaixo": RED, "Dentro": GREEN, "Acima": ORANGE}
-STATUS_ORDEM_NUM = {"Abaixo": 0, "Dentro": 1, "Acima": 2}
+    pp.secao("2. Penetração na faixa e tempo de casa")
+    h1, h2 = st.columns(2)
+    with h1:
+        pp.grafico("Penetração na faixa de mercado", histograma_penetracao(cruz), 300, SEM_DADOS)
+        st.html('<div class="nota"><b>Penetração</b> = onde o salário cai entre o mínimo e o máximo de mercado do cargo '
+                '(0,00 no mínimo, 1,00 no máximo; sem mínimo/máximo na pesquisa, 0,80 e 1,20 do adequado).</div>')
+    with h2:
+        pp.grafico("Compa-ratio mediano por tempo de casa", compa_tempo(m.por_tempo_casa(cruz)), 300, SEM_DADOS)
+        st.html('<div class="nota">Compa-ratio mediano de cada faixa de tempo de casa. Valores mais baixos no início indicam '
+                'contratação abaixo do mercado; queda nas faixas longas, salário que não acompanhou.</div>')
 
-
-NIVEL_GERAL = "Geral (todos os níveis)"
-
-
-def render_nivel_breakdown(data: pd.DataFrame, height: int = 340) -> None:
-    """Barra horizontal 100% empilhada (Abaixo/Dentro/Acima) por nível de
-    gerenciamento — substitui a pizza geral + a barra de "% dentro" por 1
-    gráfico só: a pizza só repetia os KPIs do topo sem cruzar com nível, e as
-    2 lado a lado não se equilibravam visualmente (pizza pequena e centrada
-    x barra ocupando a largura toda). Ordenado pelo % dentro da faixa ideal,
-    com uma barra "Geral" fixa no topo (não entra na ordenação) resumindo o
-    total do recorte — substitui a legenda textual que ficava acima do
-    gráfico."""
-    nivel = data["gerenciamento_nivel_cargo"].replace(NIVEL_GERENCIAMENTO_AGRUPADO).replace(NIVEL_NOME_CURTO)
-    resumo = (
-        data.assign(nivel=nivel)
-        .groupby(["nivel", "classificacao"])
-        .size()
-        .reset_index(name="quantidade")
-    )
-    geral = (
-        data.groupby("classificacao").size().reset_index(name="quantidade").assign(nivel=NIVEL_GERAL)
-    )
-    resumo = pd.concat([geral, resumo], ignore_index=True)
-    resumo["ordem_num"] = resumo["classificacao"].map(STATUS_ORDEM_NUM)
-
-    totais = resumo.groupby("nivel")["quantidade"].sum()
-    dentro_por_nivel = (
-        resumo[resumo["classificacao"] == "Dentro"].set_index("nivel")["quantidade"].reindex(totais.index).fillna(0)
-    )
-    pct_dentro = dentro_por_nivel / totais
-    ordem_niveis = [NIVEL_GERAL] + pct_dentro.drop(NIVEL_GERAL).sort_values(ascending=True).index.tolist()
-
-    chart = (
-        alt.Chart(resumo)
-        .mark_bar()
-        .encode(
-            y=alt.Y("nivel:N", title=None, sort=ordem_niveis, axis=alt.Axis(labelLimit=200)),
-            x=alt.X(
-                "quantidade:Q",
-                title="% de colaboradores",
-                stack="normalize",
-                axis=alt.Axis(format=".0%"),
-            ),
-            color=alt.Color(
-                "classificacao:N",
-                title=None,
-                scale=alt.Scale(domain=STATUS_ORDER, range=[STATUS_COLOR[s] for s in STATUS_ORDER]),
-                legend=alt.Legend(orient="bottom"),
-            ),
-            order=alt.Order("ordem_num:Q"),
-            tooltip=[
-                alt.Tooltip("nivel:N", title="Nível de gerenciamento"),
-                alt.Tooltip("classificacao:N", title="Classificação"),
-                alt.Tooltip("quantidade:Q", title="Colaboradores"),
-            ],
-        )
-        .properties(height=height)
-    )
-    st.altair_chart(chart, width="stretch")
-
-
-# Painel trabalha só de Executivo pra baixo — Diretor/Presidente/Conselheiro
-# ficam fora (decisão do usuário, 2026-09-15): são níveis de topo, pouco
-# comparáveis pela pesquisa de mercado (ver CONTEXT.md) e fora do escopo deste
-# painel. Filtra por `funcao_cargo` bruto (valores exatos confirmados no
-# Neon), antes de qualquer outro filtro — não aparecem nem como opção na
-# sidebar nem em nenhuma tabela/gráfico.
-NIVEIS_EXCLUIDOS = ["Diretor", "Presidente", "Conselheiro"]
-
-all_people, all_reference, source_name = load_data()
-all_people = all_people[~all_people["funcao_cargo"].isin(NIVEIS_EXCLUIDOS)]
-all_people["nome_diretoria"] = all_people["nome_diretoria"].fillna("Não informado")
-all_people["nome_area"] = all_people["nome_area"].fillna("Não informado")
-all_people["categoria_atribuicao"] = all_people["categoria_atribuicao"].fillna("Não informado")
-all_people["funcao_cargo"] = all_people["funcao_cargo"].fillna("Não informado")
-all_people["gerenciamento_nivel_cargo"] = all_people["gerenciamento_nivel_cargo"].fillna("Não informado")
-all_people["descricao_cargo"] = all_people["descricao_cargo"].str.strip()
-all_reference["cargo_empresa"] = all_reference["cargo_empresa"].str.strip()
-
-if source_name == "Neon":
-    # `nome_diretoria`/`nome_area` do mirror bruto (rh.gold) ficam desatualizados
-    # depois de reorganizações — mesma correção manual por centro de custo que o
-    # painel Headcount já aplica (ver etl/mapping_diretoria.py). Substitui os
-    # valores brutos globalmente (filtros, gráfico, tabelas, Job Matching).
-    resolved = [
-        mapping_diretoria.resolve_diretoria_area(cc, pos, pid)
-        for cc, pos, pid in zip(all_people["centro_de_custo"], all_people["descricao_posicao"], all_people["id_funcionario"])
-    ]
-    if resolved:
-        all_people["nome_diretoria"], all_people["nome_area"] = zip(*resolved)
-
-pessoas_loaded_at = all_people["loaded_at"].max() if "loaded_at" in all_people and not all_people.empty else None
-mercado_loaded_at = all_reference["loaded_at"].max() if "loaded_at" in all_reference and not all_reference.empty else None
-
-diretoria_options = _ordered_options(all_people["nome_diretoria"])
-area_options = _ordered_options(all_people["nome_area"])
-categoria_options = _ordered_options(all_people["categoria_atribuicao"])
-funcao_options = _ordered_options(all_people["funcao_cargo"])
-base_options = _ordered_options(all_reference["base_pesquisa"])
-
-auth.render_sidebar_account()
-
-with st.sidebar:
-    st.caption(
-        "Mapa de dispersão salarial: compara o salário individual com a referência de "
-        "mercado (Carreira Muller) do cargo equivalente."
-    )
-    st.markdown("## Explorar dados")
-    selected_base = st.selectbox("Base de pesquisa de mercado", options=base_options, index=0)
-    _data_retirada_base = all_reference.loc[all_reference["base_pesquisa"] == selected_base, "data_retirada"].max()
-    if pd.notna(_data_retirada_base):
-        st.caption(f"Relatório retirado em {_data_retirada_base:%d/%m/%Y}")
-    selected_diretorias = st.multiselect("Diretoria", options=diretoria_options, default=[], placeholder="Todas")
-    selected_areas = st.multiselect("Área", options=area_options, default=[], placeholder="Todas")
-    selected_categorias = st.multiselect("Categoria de Atribuição", options=categoria_options, default=[], placeholder="Todas")
-    selected_funcoes = st.multiselect("Função de cargo", options=funcao_options, default=[], placeholder="Todas")
-    st.caption(f"Fonte: {'Neon' if source_name == 'Neon' else source_name}")
-
-
-def _mask(column: pd.Series, selected: list[str]) -> pd.Series:
-    if not selected:
-        return pd.Series(True, index=column.index)
-    return column.isin(selected)
-
-
-filtered_people = all_people[
-    _mask(all_people["nome_diretoria"], selected_diretorias)
-    & _mask(all_people["nome_area"], selected_areas)
-    & _mask(all_people["categoria_atribuicao"], selected_categorias)
-    & _mask(all_people["funcao_cargo"], selected_funcoes)
-]
-
-reference_for_base = all_reference[all_reference["base_pesquisa"] == selected_base]
-merged = filtered_people.merge(
-    reference_for_base[["cargo_empresa", "cargo_pesquisa", "salario_adequado"]],
-    left_on="descricao_cargo",
-    right_on="cargo_empresa",
-    how="left",
-)
-plotted = merged.dropna(subset=["salario_adequado"]).copy()
-plotted = plotted[plotted["salario_adequado"] > 0]
-plotted["pct"] = plotted["salario"] / plotted["salario_adequado"] * 100
-sem_referencia = len(filtered_people) - len(plotted)
-
-plotted["classificacao"] = _classificar(plotted["pct"])
-plotted["dist_ideal"] = _dist_ideal(plotted["pct"])
-plotted["cor"] = plotted["pct"].apply(_dot_color)
-
-tab_aderencia, tab_job_matching = st.tabs(["Aderência Salarial", "Job Matching"])
-
-with tab_aderencia:
     with st.container(horizontal=True, vertical_alignment="center"):
-        st.markdown("### Posicionamento na Tabela Salarial")
-        st.badge("Dados sensíveis — acesso restrito", icon=":material/lock:", color="red")
-        st.badge(selected_base, icon=":material/query_stats:", color="blue")
+        pp.secao("3. Custo de enquadramento")
+        alvo_txt = st.segmented_control("Levar até", ["Compa-ratio 0,80", "Compa-ratio 1,00"], default="Compa-ratio 0,80",
+                                        label_visibility="collapsed", key="alvo") or "Compa-ratio 0,80"
+    alvo = 80 if alvo_txt.endswith("0,80") else 100
+    st.html(f'<div class="aviso-enq">{TEXTO_ENQ}</div>')
+    enq = m.custo_enquadramento(cruz, alvo)
+    if enq.empty:
+        st.info(f"Ninguém com compa-ratio abaixo de {_cr(alvo)} no filtro.", icon=":material/info:")
+        st.stop()
+    k = st.columns(4)
+    with k[0]:
+        pp.kpi("Pessoas abaixo do alvo", _int(len(enq)), f"de {_int(len(cruz))} comparados")
+    with k[1]:
+        pp.kpi("Custo mensal", _reais_curto(enq["falta"].sum()), "soma do que falta no salário-base", ajuda=AJUDA_ENQ)
+    with k[2]:
+        pp.kpi("Custo anual", _reais_curto(enq["falta_anual"].sum()), "12 salários + 13º + 1/3 de férias")
+    with k[3]:
+        pp.kpi("Aumento médio", _reais(enq["falta"].mean()), f"{_pct((enq['falta'] / enq['salario']).mean(), 1)} do salário")
+    e1, e2 = st.columns(2)
+    with e1:
+        t = m.custo_por(enq, "diretoria").head(10).assign(txt=lambda x: [f"{_reais_curto(v)}/mês · {_int(n)} pess." for v, n in zip(x["mensal"], x["pessoas"])])
+        pp.grafico("Por diretoria (custo mensal)", barras_valor(t, "diretoria", "mensal", "txt"), 320, SEM_DADOS)
+    with e2:
+        t = m.custo_por(enq, "descricao_cargo").head(10).assign(txt=lambda x: [f"{_reais_curto(v)}/mês · {_int(n)} pess." for v, n in zip(x["mensal"], x["pessoas"])])
+        pp.grafico("10 cargos que mais pesam (custo mensal)", barras_valor(t, "descricao_cargo", "mensal", "txt", AZUL_MEDIO), 320, SEM_DADOS)
+    st.html('<div class="nota">Quanto falta, por mês, para levar ao compa-ratio alvo quem está abaixo dele (salário-base, sem encargos).</div>')
+    enq = enq.assign(pct=(enq["pct"] / 100).round(2))
+    exp = enq[["nome_funcionario", "descricao_cargo", "diretoria", "area", "cc_texto", "salario", "salario_adequado", "pct", "alvo", "falta", "falta_anual", "base_usada"]].rename(
+        columns={"nome_funcionario": "Colaborador", "descricao_cargo": "Cargo", "diretoria": "Diretoria", "area": "Área", "cc_texto": "Centro de custo",
+                 "salario": "Salário", "salario_adequado": "Adequado", "pct": "Compa-ratio", "alvo": f"Salário alvo (compa {_cr(alvo)})",
+                 "falta": "Falta por mês", "falta_anual": "Falta por ano", "base_usada": "Base usada"}).sort_values("Falta por mês", ascending=False)
+    excel(exp, "Exportar lista de enquadramento (Excel)", f"enquadramento_{alvo}.xlsx", "x_enq", {**filtros_txt, "Alvo": alvo_txt})
 
-    caption_slot = st.empty()
-    kpi_slot = st.container()
 
-    with st.container(border=True, key="card-scatter"):
-        st.subheader("Dispersão salarial pessoa a pessoa")
-        st.caption(
-            "Cada ponto é um colaborador: azul quando está dentro da faixa ideal de aderência "
-            f"({PISO_IDEAL}%–{TETO_IDEAL}%, marcada pelas linhas verdes); quanto mais avermelhado, mais "
-            "longe dela, pra qualquer lado. A linha tracejada cinza marca o salário adequado (100%). "
-            f"Eixo fixo entre {FAIXA_MIN}% e {FAIXA_MAX}% — pontos fora desse intervalo aparecem colados "
-            "na borda."
-        )
-        selected_classes = st.multiselect(
-            "Classificação (aderência)",
-            options=["Abaixo", "Dentro", "Acima"],
-            default=[],
-            placeholder="Todas",
-            key="classificacao_filtro",
-        )
-        plotted_view = plotted if not selected_classes else plotted[plotted["classificacao"].isin(selected_classes)]
-        if plotted_view.empty:
-            st.warning("Não há colaboradores com referência de mercado disponível para este recorte de filtros.")
-            st.stop()
-        render_dispersion_chart(plotted_view, height=560)
+def pagina_pessoas() -> None:
+    with st.container(horizontal=True, vertical_alignment="center"):
+        pp.secao("1. Posicionamento na tabela salarial")
+        classes = st.pills("Classificação", ["Abaixo", "Dentro", "Acima"], selection_mode="multi", label_visibility="collapsed", key="classes")
+    vista = cruz if not classes else cruz[cruz["classificacao"].isin(classes)]
+    if vista.empty:
+        st.info("Nenhum colaborador nessa classificação.", icon=":material/info:")
+        st.stop()
+    pp.grafico("Compa-ratio pessoa a pessoa", dispersao(vista), 520, SEM_DADOS)
+    st.html('<div class="nota">Cada ponto é um colaborador. <b>Compa-ratio</b> = salário ÷ salário adequado da pesquisa para o '
+            'cargo equivalente (1,00 = na referência; 0,91 = 9% abaixo). Azul dentro da faixa ideal (0,80 a 1,20, linhas verdes); '
+            'quanto mais vermelho, mais longe dela. Linha tracejada = 1,00. Pontos fora de 0,60 a 1,40 ficam na borda. '
+            'Arraste para dar zoom; duplo clique volta. A classificação escolhida vale para esta página inteira.</div>')
 
-    caption_slot.caption(
-        f"{format_number(len(plotted_view))} colaboradores plotados neste recorte · "
-        f"{format_number(sem_referencia)} sem cargo equivalente na pesquisa de mercado selecionada (não plotados)"
-    )
+    pp.secao("2. Extremos e detalhamento")
+    x1, x2 = st.columns(2)
+    cols_top = [("nome_funcionario", "Colaborador", None, "txt"), ("descricao_cargo", "Cargo", None, "txt"), ("pct", "Compa-ratio", 190, "barra")]
+    with x1:
+        st.html('<div class="titulo-graf">5 mais abaixo do adequado</div>')
+        tabela_html(vista.nsmallest(5, "pct"), cols_top, 260)
+    with x2:
+        st.html('<div class="titulo-graf">5 mais acima do adequado</div>')
+        tabela_html(vista.nlargest(5, "pct"), cols_top, 260)
+    st.html('<div class="titulo-graf" style="margin-top:.6rem">Detalhamento pessoa a pessoa</div>')
+    busca = st.text_input("Buscar por colaborador, cargo, diretoria ou área", placeholder="Digite para filtrar…", key="busca")
+    det = vista.sort_values("pct")
+    if busca.strip():
+        t_ = busca.strip().lower()
+        det = det[det[["nome_funcionario", "descricao_cargo", "diretoria", "area"]].apply(lambda s: s.str.lower().str.contains(t_, na=False)).any(axis=1)]
+    tabela_html(det.head(LIMITE_TABELA), [("nome_funcionario", "Colaborador", None, "txt"), ("descricao_cargo", "Cargo", None, "txt"),
+                                          ("diretoria", "Diretoria", None, "txt"), ("salario", "Salário", 100, "reais"),
+                                          ("salario_adequado", "Adequado", 100, "reais"), ("pct", "Compa-ratio", 190, "barra"),
+                                          ("base_usada", "Base usada", 190, "txt")], 480)
+    if len(det) > LIMITE_TABELA:
+        st.html(f'<div class="nota">Mostrando {_int(LIMITE_TABELA)} de {_int(len(det))} colaboradores (menor compa-ratio primeiro). '
+                'Use a busca para achar alguém ou exporte a lista completa.</div>')
+    excel(det.assign(pct=(det["pct"] / 100).round(2), penetracao=(det["penetracao"] / 100).round(2))[
+        ["nome_funcionario", "descricao_cargo", "diretoria", "area", "cc_texto", "salario", "salario_adequado", "pct", "penetracao", "base_usada"]].rename(
+        columns={"nome_funcionario": "Colaborador", "descricao_cargo": "Cargo", "diretoria": "Diretoria", "area": "Área", "cc_texto": "Centro de custo",
+                 "salario": "Salário", "salario_adequado": "Adequado", "pct": "Compa-ratio", "penetracao": "Penetração na faixa",
+                 "base_usada": "Base usada"}),
+          "Exportar detalhamento (Excel)", "detalhamento_aderencia.xlsx", "x_det", {**filtros_txt, "Classificação": classes})
 
-    status_counts = plotted_view["classificacao"].value_counts()
-    abaixo = status_counts.get("Abaixo", 0) / len(plotted_view) * 100
-    dentro = status_counts.get("Dentro", 0) / len(plotted_view) * 100
-    acima = status_counts.get("Acima", 0) / len(plotted_view) * 100
-    mediana = plotted_view["pct"].median()
 
-    with kpi_slot:
-        kpi_cols = st.columns(5)
-        with kpi_cols[0]:
-            render_kpi_card("Colaboradores no filtro", format_number(len(plotted_view)), f"{format_number(sem_referencia)} sem referência de mercado")
-        with kpi_cols[1]:
-            render_kpi_card("Dentro da faixa ideal", f"{dentro:.0f}%", f"Entre {PISO_IDEAL}% e {TETO_IDEAL}% do adequado", value_color=GREEN)
-        with kpi_cols[2]:
-            render_kpi_card("Abaixo da faixa ideal", f"{abaixo:.0f}%", f"Menos de {PISO_IDEAL}% do adequado", value_color=RED)
-        with kpi_cols[3]:
-            render_kpi_card("Acima da faixa ideal", f"{acima:.0f}%", f"Mais de {TETO_IDEAL}% do adequado", value_color=ORANGE)
-        with kpi_cols[4]:
-            render_kpi_card("Mediana de aderência", f"{mediana:.0f}%", "% do salário adequado", value_color=BRAND_COLOR)
+def pagina_cargos() -> None:
+    pp.secao("1. Job Matching — cargos comparados na Carreira Muller")
+    com, sem = m.job_matching(base_p, mercado, ordem_bases)
+    n_cargos = len(com) + len(sem)
+    n_pess = com["qtd"].sum() + sem["qtd"].sum()
+    j1, j2 = st.columns(2)
+    with j1:
+        pp.grafico(f"Cargos com referência ({_int(len(com))} de {_int(n_cargos)})", cobertura(len(com) / n_cargos if n_cargos else 0), 34, SEM_DADOS)
+    with j2:
+        pp.grafico(f"Colaboradores com referência ({_int(com['qtd'].sum())} de {_int(n_pess)})", cobertura(com["qtd"].sum() / n_pess if n_pess else 0), 34, SEM_DADOS)
+    com = com.assign(faixa=_faixa(com))
+    if len(ordem_bases) > 1:
+        orig = com.groupby("base_usada").agg(cargos=("descricao_cargo", "size"), pessoas=("qtd", "sum")).reindex(ordem_bases).fillna(0).reset_index()
+        orig["retirada"] = [mercado.loc[mercado["base_pesquisa"] == b, "data_retirada"].max() for b in orig["base_usada"]]
+        orig["retirada"] = [f"{pd.Timestamp(d):%d/%m/%Y}" if pd.notna(d) else "—" for d in orig["retirada"]]
+        orig.insert(0, "ordem", [f"{i + 1}ª" for i in range(len(orig))])
+        st.html('<div class="titulo-graf" style="margin-top:.6rem">De onde veio a referência (Personalizado)</div>')
+        tabela_html(orig, [("ordem", "Ordem", 70, "txt"), ("base_usada", "Base", None, "txt"), ("cargos", "Cargos", 90, "int"),
+                           ("pessoas", "Pessoas", 90, "int"), ("retirada", "Relatório retirado em", 170, "txt")], 220)
+    with st.container(horizontal=True, vertical_alignment="center"):
+        st.html(f'<div class="titulo-graf" style="margin-bottom:0">Cargos com Job Matching ({_int(len(com))}) · ordem: mais longe do mercado primeiro</div>')
+        classes_jm = st.pills("Classificação do cargo", ["Abaixo", "Dentro", "Acima"], selection_mode="multi", label_visibility="collapsed", key="classes_jm")
+    com_v = com if not classes_jm else com[com["classificacao"].isin(classes_jm)]
+    com_v = com_v.assign(dist=(com_v["aderencia"] - 100).abs()).sort_values("dist", ascending=False)
+    tabela_html(com_v, [("descricao_cargo", "Cargo interno", None, "txt"), ("cargo_pesquisa", "Cargo na pesquisa", None, "txt"), ("qtd", "Qtd.", 55, "int"),
+                        ("sal_mediana", "Salário interno", 110, "reais"), ("faixa", "Faixa interna (paga)", 170, "txt"), ("minimo", "Mínimo mercado", 110, "reais"),
+                        ("salario_adequado", "Adequado", 100, "reais"), ("maximo", "Máximo mercado", 110, "reais"), ("aderencia", "Compa-ratio da mediana", 190, "barra"),
+                        ("base_usada", "Base usada", 180, "txt")], 440)
+    excel(com_v.drop(columns=["dist"]).assign(aderencia=(com_v["aderencia"] / 100).round(2)).rename(columns={"aderencia": "compa_ratio_mediana"}),
+          "Exportar cargos com Job Matching (Excel)", "cargos_com_job_matching.xlsx", "x_jm_com", filtros_txt)
 
-    with st.container(border=True, key="card-pizza-nivel"):
-        st.subheader("Aderência por nível de gerenciamento")
-        render_nivel_breakdown(plotted_view)
+    sem = sem.assign(faixa=_faixa(sem)).sort_values("qtd", ascending=False)
+    st.html(f'<div class="titulo-graf" style="margin-top:.8rem">Cargos sem Job Matching ({_int(len(sem))}) · mais pessoas primeiro</div>')
+    tabela_html(sem, [("descricao_cargo", "Cargo", None, "txt"), ("qtd", "Qtd.", 60, "int"), ("sal_mediana", "Salário (mediana)", 140, "reais"),
+                      ("faixa", "Faixa paga", 180, "txt")], 380)
+    excel(sem, "Exportar cargos sem Job Matching (Excel)", "cargos_sem_job_matching.xlsx", "x_jm_sem", filtros_txt)
+    st.html('<div class="nota">Cruzamento pelo nome do cargo interno contra o cargo equivalente mapeado na pesquisa. '
+            '"Faixa interna" é o menor e o maior salário pago hoje no cargo (não é uma tabela salarial oficial).</div>')
 
-    with st.expander("Detalhamento", expanded=False, key="card-detalhe"):
-        st.caption("Dados sensíveis — não compartilhe fora do time autorizado.")
-        detail = plotted_view.rename(
-            columns={
-                "nome_funcionario": "Colaborador",
-                "descricao_cargo": "Cargo",
-                "nome_diretoria": "Diretoria",
-                "nome_area": "Área",
-                "salario": "Salário",
-                "salario_adequado": "Adequado (mercado)",
-                "pct": "% do adequado",
-            }
-        )[["Colaborador", "Cargo", "Diretoria", "Área", "Salário", "Adequado (mercado)", "% do adequado"]]
+    pp.secao("2. Compressão salarial — recém-contratados x veteranos")
+    cp = m.compressao(cruz)
+    if cp.empty:
+        st.info("Nenhum cargo com pelo menos 2 recém-contratados e 2 veteranos no filtro.", icon=":material/info:")
+        st.stop()
+    comprimidos = cp[cp["razao"] >= 1]
+    k = st.columns(3)
+    with k[0]:
+        pp.kpi("Cargos analisados", _int(len(cp)), "com 2+ recentes e 2+ veteranos")
+    with k[1]:
+        pp.kpi("Cargos com compressão", _int(len(comprimidos)), "recém-contratados ganham igual ou mais", VERMELHO if len(comprimidos) else VERDE)
+    with k[2]:
+        pp.kpi("Pessoas nesses cargos", _int((comprimidos["size_recentes"] + comprimidos["size_veteranos"]).sum()), "recentes + veteranos")
+    tab = cp.assign(**{"Diferença": [f"{'+' if v >= 1 else '−'}{abs(v - 1) * 100:.0f}%" for v in cp["razao"]]})
+    tabela_html(tab.head(25), [("descricao_cargo", "Cargo", None, "txt"), ("size_recentes", "Recentes (≤ 12 meses)", 175, "int"),
+                               ("median_recentes", "Mediana recentes", 140, "reais"), ("size_veteranos", "Veteranos", 100, "int"),
+                               ("median_veteranos", "Mediana veteranos", 140, "reais"), ("Diferença", "Recentes vs veteranos (%)", 190, "txt")], 380)
+    st.html('<div class="nota">Mesmo cargo: salário mediano de quem entrou nos últimos 12 meses contra quem tem mais tempo. '
+            'Diferença positiva = quem acabou de chegar já ganha mais — risco de saída e de insatisfação dos veteranos.</div>')
 
-        busca_col, ordenar_col, ordem_col = st.columns([2, 1.4, 1])
-        with busca_col:
-            busca = st.text_input(
-                "Buscar por colaborador, cargo, diretoria ou área",
-                key="detalhe_busca",
-                placeholder="Digite para filtrar...",
-            )
-        with ordenar_col:
-            ordenar_por = st.selectbox(
-                "Ordenar por",
-                options=["% do adequado", "Salário", "Colaborador", "Cargo", "Diretoria"],
-                key="detalhe_ordenar",
-            )
-        with ordem_col:
-            ordem_desc = st.toggle("Decrescente", key="detalhe_desc")
 
-        if busca.strip():
-            termo = busca.strip().lower()
-            detail = detail[
-                detail["Colaborador"].str.lower().str.contains(termo, na=False)
-                | detail["Cargo"].str.lower().str.contains(termo, na=False)
-                | detail["Diretoria"].str.lower().str.contains(termo, na=False)
-                | detail["Área"].str.lower().str.contains(termo, na=False)
-            ]
-        detail = detail.sort_values(ordenar_por, ascending=not ordem_desc)
-
-        _render_html_table(
-            detail,
-            columns=[
-                {"key": "Colaborador", "label": "Colaborador", "flex": "1.3"},
-                {"key": "Cargo", "label": "Cargo", "flex": "1.3"},
-                {"key": "Diretoria", "label": "Diretoria", "flex": "1.2"},
-                {"key": "Área", "label": "Área", "flex": "1.1"},
-                {"key": "Salário", "label": "Salário", "flex": "0 0 90px", "align": "right", "kind": "currency"},
-                {"key": "Adequado (mercado)", "label": "Adequado", "flex": "0 0 90px", "align": "right", "kind": "currency"},
-                {"key": "% do adequado", "label": "% do adequado", "flex": "0 0 180px", "kind": "bar"},
-            ],
-        )
-        _excel_download_button(detail, "Exportar para Excel", "detalhamento_aderencia_salarial.xlsx", key="excel_detalhe")
-
-    with st.container(border=True, key="card-top5"):
-        st.subheader("Extremos da tabela salarial")
-        col_abaixo, col_acima = st.columns(2)
-        top_cols = {
-            "nome_funcionario": "Colaborador",
-            "descricao_cargo": "Cargo",
-            "pct": "% do adequado",
-        }
-        top5_columns = [
-            {"key": "Colaborador", "label": "Colaborador", "flex": "1.3"},
-            {"key": "Cargo", "label": "Cargo", "flex": "1.3"},
-            {"key": "% do adequado", "label": "% do adequado", "flex": "0 0 180px", "kind": "bar"},
-        ]
-        with col_abaixo:
-            st.caption("5 colaboradores mais abaixo do adequado")
-            top5_abaixo = plotted_view.nsmallest(5, "pct")[list(top_cols)].rename(columns=top_cols)
-            _render_html_table(top5_abaixo, columns=top5_columns, max_height=260)
-            _excel_download_button(top5_abaixo, "Exportar para Excel", "top5_abaixo_adequado.xlsx", key="excel_top5_abaixo")
-        with col_acima:
-            st.caption("5 colaboradores mais acima do adequado")
-            top5_acima = plotted_view.nlargest(5, "pct")[list(top_cols)].rename(columns=top_cols)
-            _render_html_table(top5_acima, columns=top5_columns, max_height=260)
-            _excel_download_button(top5_acima, "Exportar para Excel", "top5_acima_adequado.xlsx", key="excel_top5_acima")
-
-    with st.expander("Sobre este painel"):
-        st.write(
-            "Compara o salário individual de cada colaborador ativo com a referência de mercado da "
-            "Carreira Muller para o cargo equivalente. O valor de referência (100%) é o "
-            "\"salário adequado\" da pesquisa de mercado selecionada na barra lateral."
-        )
-        st.write(
-            "O cruzamento é feito por nome do cargo interno (`descricao_cargo`) contra o cargo "
-            "equivalente mapeado na pesquisa (`Cargo_Empresa`). Cargos sem equivalente na pesquisa "
-            "(ex.: posições de diretoria, cargos muito recentes) ficam de fora do gráfico — contados "
-            "à parte na legenda acima, e listados na aba \"Job Matching\"."
-        )
-        st.caption(f"Fonte atual: {source_name} · Referência de mercado: etl/upload_faixas_salariais.py")
-
-with tab_job_matching:
-    st.markdown("### Job Matching — cargos comparados na Carreira Muller")
-    st.caption(
-        "Cobertura da pesquisa de mercado sobre os cargos internos (recorte de filtros da barra lateral, "
-        "exceto Classificação — que é específica da aba Aderência Salarial)."
-    )
-
-    cargo_stats = (
-        filtered_people.groupby("descricao_cargo")
-        .agg(qtd=("salario", "size"), sal_min=("salario", "min"), sal_mediana=("salario", "median"), sal_max=("salario", "max"))
-        .reset_index()
-    )
-    cargo_ref = reference_for_base[
-        ["cargo_empresa", "cargo_pesquisa", "salario_adequado", "salario_minimo", "salario_maximo", "data_retirada"]
-    ].drop_duplicates("cargo_empresa")
-    cargo_matched = cargo_stats.merge(cargo_ref, left_on="descricao_cargo", right_on="cargo_empresa", how="left")
-    com_matching = cargo_matched[cargo_matched["salario_adequado"].notna()].copy()
-    sem_matching = cargo_matched[cargo_matched["salario_adequado"].isna()].copy()
-
-    cargos_total = len(cargo_matched)
-    cargos_sem_pct = len(sem_matching) / cargos_total * 100 if cargos_total else 0
-    pessoas_total = cargo_matched["qtd"].sum()
-    pessoas_sem_pct = sem_matching["qtd"].sum() / pessoas_total * 100 if pessoas_total else 0
-
-    def _render_coverage_bar(pct_sem: float, height: int = 40) -> None:
-        """Barra horizontal única 100% empilhada: Com referência x Sem
-        referência. Sem eixo numérico (0-100 com marcações a cada 5 unidades
-        era denso demais pra uma barra de 2 segmentos só, e disputava espaço
-        com a legenda logo acima) — o valor de cada segmento vai direto nele,
-        como rótulo. Posição do rótulo calculada no Python (início/fim/meio
-        de cada segmento) em vez de depender do texto acompanhar o `stack`
-        automático do Vega-Lite, que não posiciona texto do mesmo jeito que
-        barras. Sem nenhum encoding de posição vertical (`y`), o Vega-Lite
-        colapsa a área do gráfico pra altura 0 (confirmado inspecionando o
-        SVG gerado) — por isso a marca usa altura literal em pixels
-        (`mark_bar(height=...)`), que não depende da escala de banda."""
-        data = pd.DataFrame({"situacao": ["Com referência", "Sem referência"], "pct": [100 - pct_sem, pct_sem]})
-        data["fim"] = data["pct"].cumsum()
-        data["inicio"] = data["fim"] - data["pct"]
-        data["meio"] = (data["inicio"] + data["fim"]) / 2
-        data["rotulo"] = data["pct"].round().astype(int).astype(str) + "%"
-
-        base = alt.Chart(data).encode(
-            color=alt.Color(
-                "situacao:N",
-                title=None,
-                scale=alt.Scale(domain=["Com referência", "Sem referência"], range=[BRAND_COLOR, GRAY]),
-                legend=None,
-            ),
-            tooltip=[
-                alt.Tooltip("situacao:N", title="Situação"),
-                alt.Tooltip("pct:Q", title="%", format=".1f"),
-            ],
-        )
-        bars = base.mark_bar(height=height - 12).encode(
-            x=alt.X("inicio:Q", title=None, scale=alt.Scale(domain=[0, 100]), axis=None),
-            x2="fim:Q",
-        )
-        # `color=alt.value(...)` explícito — sem isso, o encoding de cor herdado
-        # do `base` (escala navy/cinza por categoria) sobrescreve a cor do mark,
-        # e o texto sai da mesma cor do fundo (invisível, bug visto em teste real).
-        labels = base.mark_text(fontWeight=700, fontSize=12).encode(
-            x="meio:Q", text="rotulo:N", color=alt.value("#FFFFFF")
-        )
-        st.altair_chart((bars + labels).properties(height=height), width="stretch")
-
-    with st.container(border=True, key="card-jobmatching-overview"):
-        # Legenda única compartilhada pelos 2 gráficos (em vez da legenda nativa
-        # do Altair, que disputava espaço vertical com os eixos num gráfico de
-        # só 60px de altura e ficava sobreposta).
-        st.markdown(
-            f'<span style="color:{BRAND_COLOR}">●</span> Com referência &nbsp;&nbsp;&nbsp;'
-            f'<span style="color:{GRAY}">●</span> Sem referência',
-            unsafe_allow_html=True,
-        )
-        col_cargos, col_colab = st.columns(2)
-        with col_cargos:
-            st.markdown(f"**Cargos** · {cargos_sem_pct:.0f}% sem referência")
-            _render_coverage_bar(cargos_sem_pct)
-        with col_colab:
-            st.markdown(f"**Colaboradores** · {pessoas_sem_pct:.0f}% sem referência")
-            _render_coverage_bar(pessoas_sem_pct)
-
-    with st.container(border=True, key="card-jobmatching-tabelas"):
-        st.subheader(f"Cargos com Job Matching ({len(com_matching)})")
-        com_matching["Aderência à Mediana Mercado"] = com_matching["sal_mediana"] / com_matching["salario_adequado"] * 100
-        com_matching["classificacao"] = _classificar(com_matching["Aderência à Mediana Mercado"])
-        filtro_classificacao = st.multiselect(
-            "Cargos por aderência (mediana interna x mercado)",
-            options=["Abaixo", "Dentro", "Acima"],
-            default=[],
-            placeholder="Todas",
-            key="jm_filtro_classificacao",
-        )
-        com_view = com_matching if not filtro_classificacao else com_matching[com_matching["classificacao"].isin(filtro_classificacao)]
-
-        com_view = com_view.assign(
-            **{
-                "Qtd.": com_view["qtd"],
-                "Salário Interno (mediana)": com_view["sal_mediana"],
-                "Faixa Interna": np.where(
-                    com_view["sal_min"].round() != com_view["sal_max"].round(),
-                    com_view["sal_min"].apply(format_currency) + " – " + com_view["sal_max"].apply(format_currency),
-                    "—",
-                ),
-                # Mínimo/Máximo reais quando o recorte já foi atualizado com essa
-                # informação (etl/atualizar_recorte_mercado.py); nos recortes ainda
-                # não atualizados, cai no cálculo 80%/120% do Adequado combinado
-                # com o time em 2026-09-15.
-                "Mínimo Mercado": com_view["salario_minimo"].fillna(com_view["salario_adequado"] * (PISO_IDEAL / 100)),
-                "Adequado Mercado": com_view["salario_adequado"],
-                "Máximo Mercado": com_view["salario_maximo"].fillna(com_view["salario_adequado"] * (TETO_IDEAL / 100)),
-            }
-        ).rename(columns={"descricao_cargo": "Cargo Interno", "cargo_pesquisa": "Cargo Relacionado"})[
-            [
-                "Cargo Interno",
-                "Cargo Relacionado",
-                "Qtd.",
-                "Salário Interno (mediana)",
-                "Faixa Interna",
-                "Mínimo Mercado",
-                "Adequado Mercado",
-                "Máximo Mercado",
-                "Aderência à Mediana Mercado",
-            ]
-        ]
-
-        com_ordenar_col, com_ordem_col = st.columns([2, 1])
-        with com_ordenar_col:
-            com_ordenar_por = st.selectbox(
-                "Ordenar por",
-                options=["Aderência à Mediana Mercado", "Qtd.", "Salário Interno (mediana)", "Cargo Interno"],
-                key="jm_com_ordenar",
-            )
-        with com_ordem_col:
-            com_ordem_desc = st.toggle("Decrescente", key="jm_com_desc")
-        com_view = com_view.sort_values(com_ordenar_por, ascending=not com_ordem_desc)
-
-        _render_html_table(
-            com_view,
-            columns=[
-                {"key": "Cargo Interno", "label": "Cargo Interno", "flex": "1.3"},
-                {"key": "Cargo Relacionado", "label": "Cargo Relacionado", "flex": "1.3"},
-                {"key": "Qtd.", "label": "Qtd.", "flex": "0 0 55px", "align": "right", "kind": "int", "bold_if_one": True},
-                {"key": "Salário Interno (mediana)", "label": "Salário Interno", "flex": "0 0 100px", "align": "right", "kind": "currency"},
-                {"key": "Faixa Interna", "label": "Faixa Interna", "flex": "0 0 150px"},
-                {"key": "Mínimo Mercado", "label": "Mínimo Mercado", "flex": "0 0 100px", "align": "right", "kind": "currency"},
-                {"key": "Adequado Mercado", "label": "Adequado Mercado", "flex": "0 0 100px", "align": "right", "kind": "currency"},
-                {"key": "Máximo Mercado", "label": "Máximo Mercado", "flex": "0 0 100px", "align": "right", "kind": "currency"},
-                {"key": "Aderência à Mediana Mercado", "label": "Aderência à Mediana", "flex": "0 0 180px", "kind": "bar"},
-            ],
-        )
-        _excel_download_button(com_view, "Exportar para Excel", "cargos_com_job_matching.xlsx", key="excel_jm_com")
-
-        st.subheader(f"Cargos sem Job Matching ({len(sem_matching)})")
-        sem_view = sem_matching.assign(
-            **{
-                "Qtd.": sem_matching["qtd"],
-                "Salário (mediana)": sem_matching["sal_mediana"],
-                "Faixa": np.where(
-                    sem_matching["sal_min"].round() != sem_matching["sal_max"].round(),
-                    sem_matching["sal_min"].apply(format_currency) + " – " + sem_matching["sal_max"].apply(format_currency),
-                    "—",
-                ),
-            }
-        ).rename(columns={"descricao_cargo": "Cargo"})[["Cargo", "Qtd.", "Salário (mediana)", "Faixa"]]
-
-        sem_ordenar_col, sem_ordem_col = st.columns([2, 1])
-        with sem_ordenar_col:
-            sem_ordenar_por = st.selectbox(
-                "Ordenar por", options=["Qtd.", "Salário (mediana)", "Cargo"], key="jm_sem_ordenar"
-            )
-        with sem_ordem_col:
-            sem_ordem_desc = st.toggle("Decrescente", value=True, key="jm_sem_desc")
-        sem_view = sem_view.sort_values(sem_ordenar_por, ascending=not sem_ordem_desc)
-
-        _render_html_table(
-            sem_view,
-            columns=[
-                {"key": "Cargo", "label": "Cargo", "flex": "1.5"},
-                {"key": "Qtd.", "label": "Qtd.", "flex": "0 0 55px", "align": "right", "kind": "int", "bold_if_one": True},
-                {"key": "Salário (mediana)", "label": "Salário (mediana)", "flex": "0 0 130px", "align": "right", "kind": "currency"},
-                {"key": "Faixa", "label": "Faixa", "flex": "0 0 170px"},
-            ],
-        )
-        _excel_download_button(sem_view, "Exportar para Excel", "cargos_sem_job_matching.xlsx", key="excel_jm_sem")
-
-        caption_parts = []
-        if pessoas_loaded_at is not None and pd.notna(pessoas_loaded_at):
-            caption_parts.append(f"Pessoas atualizadas em {pessoas_loaded_at:%d/%m/%Y %H:%M}")
-        if mercado_loaded_at is not None and pd.notna(mercado_loaded_at):
-            caption_parts.append(f"Mercado atualizado em {mercado_loaded_at:%d/%m/%Y %H:%M}")
-        if pd.notna(_data_retirada_base):
-            caption_parts.append(f"Relatório ({selected_base}) retirado em {_data_retirada_base:%d/%m/%Y}")
-        if caption_parts:
-            st.caption(" · ".join(caption_parts))
+pp.cabecalho(navegacao.title, atualizado_em=carga or ref, filtros=filtros_txt,
+             legenda=f"Quadro ativo em {ref:%d/%m/%Y} · {_int(len(cruz))} colaboradores comparados com a pesquisa · "
+                     f"{_int(sem_ref)} sem cargo equivalente (ver Cargo e Mercado) · diretores, presidente e conselho fora")
+if cruz.empty and navegacao.title != "Cargo e Mercado":
+    st.info(SEM_DADOS, icon=":material/info:")
+    st.stop()
+navegacao.run()
